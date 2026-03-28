@@ -1,0 +1,76 @@
+name: PR Policy (Jira + Branch Naming)
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+    branches:
+      - develop
+      - main
+
+permissions:
+  pull-requests: read
+
+jobs:
+  policy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate PR title contains Jira key (e.g., GP-123)
+        shell: bash
+        run: |
+          TITLE="${{ github.event.pull_request.title }}"
+          echo "PR Title: $TITLE"
+          echo "$TITLE" | grep -Eiq '\bGP-[0-9]+\b' || {
+            echo "ERROR: PR title must include a Jira key like 'GP-123'."
+            exit 1
+          }
+
+      - name: Validate source branch naming convention
+        shell: bash
+        run: |
+          BRANCH="${{ github.event.pull_request.head.ref }}"
+          echo "Source Branch: $BRANCH"
+
+          # Allowed patterns:
+          # feature/GP-123-something
+          # bugfix/GP-123-something
+          # hotfix/GP-123-something
+          # research/GP-123-something
+          # docs/GP-123-something
+          # refactor/GP-123-something
+          echo "$BRANCH" | grep -Eiq '^(feature|bugfix|hotfix|release|research|docs|refactor)/GP-[0-9]+[-/].+' || {
+            echo "ERROR: Branch name must match one of:"
+            echo "  feature/GP-123-..."
+            echo "  bugfix/GP-123-..."
+            echo "  hotfix/GP-123-..."
+            echo "  research/GP-123-..."
+            echo "  docs/GP-123-..."
+            echo "  refactor/GP-123-..."
+            exit 1
+          }
+
+      - name: Validate PR is not targeting an invalid base (optional safety)
+        shell: bash
+        run: |
+          BASE="${{ github.event.pull_request.base.ref }}"
+          echo "Base Branch: $BASE"
+          if [[ "$BASE" != "develop" && "$BASE" != "main" ]]; then
+            echo "ERROR: PR base must be develop or main."
+            exit 1
+          fi
+      - name: Restrict PRs into main (allow only hotfix/* or release/*)
+        shell: bash
+        run: |
+          BASE="${{ github.event.pull_request.base.ref }}"
+          HEAD="${{ github.event.pull_request.head.ref }}"
+          echo "Base Branch: $BASE"
+          echo "Head Branch: $HEAD"
+
+          if [[ "$BASE" == "main" ]]; then
+            echo "$HEAD" | grep -Eiq '^(hotfix|release)/' || {
+              echo "ERROR: PRs targeting 'main' are only allowed from 'hotfix/*' or 'release/*' branches."
+              echo "Example allowed:"
+              echo "  hotfix/GP-99-crash-on-start"
+              echo "  release/v0.3.0"
+              exit 1
+            }
+          fi
