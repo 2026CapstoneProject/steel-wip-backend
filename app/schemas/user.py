@@ -1,7 +1,7 @@
 # schemas/user.py
 from pydantic import BaseModel, ConfigDict
 from typing import Optional
-from schemas.enums import UserRole
+from app.schemas.enums import UserRole
 
 class UserBase(BaseModel):
     username: str

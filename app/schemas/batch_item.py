@@ -2,7 +2,7 @@
 from pydantic import BaseModel, ConfigDict
 from typing import Optional
 from datetime import datetime
-from schemas.enums import BatchItemStatus, BatchActionType
+from app.schemas.enums import BatchItemStatus, BatchActionType
 
 class BatchItemBase(BaseModel):
     batch_id: int

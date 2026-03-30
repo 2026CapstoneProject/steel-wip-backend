@@ -2,7 +2,7 @@
 from pydantic import BaseModel, ConfigDict
 from typing import Optional
 from datetime import datetime
-from schemas.enums import CuttingStatus, CuttingPriority
+from app.schemas.enums import CuttingStatus, CuttingPriority
 
 class LazerCuttingBase(BaseModel):
     scenario_id: Optional[int] = None

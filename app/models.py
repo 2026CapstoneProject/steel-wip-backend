@@ -1,3 +1,4 @@
+from __future__ import annotations
 from typing import Optional
 import datetime
 import enum
@@ -5,6 +6,7 @@ import enum
 from sqlalchemy import DateTime, Enum, Float, ForeignKeyConstraint, Index, Integer, String, TIMESTAMP, text
 from sqlalchemy.dialects.mysql import TINYINT
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
 
 class Base(DeclarativeBase):
     pass

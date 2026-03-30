@@ -2,7 +2,7 @@
 from pydantic import BaseModel, ConfigDict
 from typing import Optional
 from datetime import datetime
-from schemas.enums import ScenarioStatus, LazerType
+from app.schemas.enums import ScenarioStatus, LazerType
 
 class ScenarioBase(BaseModel):
     title: str

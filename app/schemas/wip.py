@@ -1,7 +1,7 @@
 # schemas/wip.py
 from pydantic import BaseModel, ConfigDict
 from typing import Optional
-from schemas.enums import WipStatus
+from app.schemas.enums import WipStatus
 
 class SteelWipBase(BaseModel):
     status: WipStatus = WipStatus.REGISTERED
