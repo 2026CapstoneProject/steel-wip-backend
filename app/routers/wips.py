@@ -7,7 +7,6 @@ from app.database import get_db
 
 router = APIRouter(prefix="/wips", tags=["Steel WIPs"])
 
-##응애애애애애
 # 1. 잔재 등록
 @router.post("/", response_model=schemas.BaseResponse[schemas.SteelWipResponse], status_code=status.HTTP_201_CREATED)
 async def create_wip(wip: schemas.SteelWipCreate, db: AsyncSession = Depends(get_db)):
