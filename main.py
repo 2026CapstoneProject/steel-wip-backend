@@ -40,8 +40,8 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 # 2. 라우터 등록
 # ---------------------------------------------------------
 
-app.include_router(users.router, prefix="/users", tags=["Users"])
-app.include_router(wips.router, prefix="/wips", tags=["Steel WIPs"])
+app.include_router(users.router, prefix="/api/users", tags=["Users"])
+app.include_router(wips.router, prefix="/api/wips", tags=["Steel WIPs"])
 
 @app.get("/")
 async def root():
