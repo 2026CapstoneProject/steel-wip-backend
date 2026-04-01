@@ -19,7 +19,7 @@ from .enums import (
 from .user import UserBase, UserCreate, UserUpdate, UserResponse
 
 # 재공품 스키마
-from .wip import SteelWipBase, SteelWipCreate, SteelWipUpdate, SteelWipResponse
+from .wip import SteelWipBase, SteelWipCreate, SteelWipUpdate, SteelWipResponse, SteelWipWithQrResponse
 
 # 재공품 이력 스키마
 from .steel_wip_history import SteelWipHistoryBase, SteelWipHistoryCreate, SteelWipHistoryUpdate, SteelWipHistoryResponse
