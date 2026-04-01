@@ -1,11 +1,14 @@
 # app/routers/wips.py
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import List
+from typing import List, Optional
 
 from app.database import get_db
 from app.crud import wip as wip_crud
 from app.schemas import SteelWipCreate, SteelWipUpdate, SteelWipResponse, BaseResponse
+from app.services import inventory_service
+from app.schemas.wip import SteelWipWithQrResponse
+
 
 router = APIRouter()
 
@@ -26,10 +29,39 @@ async def get_steel_wip(wip_id: int, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404, detail="재공품을 찾을 수 없습니다.")
     return BaseResponse(status=200, message="재공품 조회 성공", data=wip)
 
-@router.get("", response_model=BaseResponse[List[SteelWipResponse]])
-async def list_steel_wips(skip: int = 0, limit: int = 100, db: AsyncSession = Depends(get_db)):
-    wips = await wip_crud.get_wips(db, skip, limit)
-    return BaseResponse(status=200, message="재공품 목록 조회 성공", data=wips)
+@router.get("", response_model=BaseResponse[List[SteelWipWithQrResponse]])
+async def get_wip_inventory(
+    db: AsyncSession = Depends(get_db),
+    qr: Optional[str] = Query(None, description="QR 코드 값"),
+    manufacturer: Optional[str] = Query(None, description="제조사 (예: POSCO)"),
+    material: Optional[str] = Query(None, description="재질 (예: SM355A)"),
+    thickness: Optional[float] = Query(None, description="두께"),
+    minWidth: Optional[float] = Query(None, description="최소 폭"),
+    maxWidth: Optional[float] = Query(None, description="최대 폭"),
+    minLength: Optional[float] = Query(None, description="최소 길이"),
+    maxLength: Optional[float] = Query(None, description="최대 길이")
+):
+    """
+    재고 현황 조회 (다중 필터링 지원)
+    - 아무 파라미터를 넣지 않으면 전체 재고를 반환합니다.
+    """
+    results = await inventory_service.get_filtered_wips(
+        db=db,
+        qr=qr,
+        manufacturer=manufacturer,
+        material=material,
+        thickness=thickness,
+        minWidth=minWidth,
+        maxWidth=maxWidth,
+        minLength=minLength,
+        maxLength=maxLength
+    )
+    
+    return BaseResponse(
+        status=200,
+        message="재고 조회에 성공했습니다.",
+        data=results
+    )
 
 @router.patch("/{wip_id}", response_model=BaseResponse[SteelWipResponse])
 async def update_steel_wip(wip_id: int, wip: SteelWipUpdate, db: AsyncSession = Depends(get_db)):

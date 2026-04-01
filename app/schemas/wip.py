@@ -3,6 +3,7 @@ from pydantic import BaseModel, ConfigDict
 from typing import Optional
 from app.schemas.enums import WipStatus
 
+
 class SteelWipBase(BaseModel):
     status: WipStatus = WipStatus.REGISTERED
     manufacturer: str
@@ -27,3 +28,6 @@ class SteelWipResponse(SteelWipBase):
     id: int
     
     model_config = ConfigDict(from_attributes=True)
+
+class SteelWipWithQrResponse(SteelWipResponse):
+    qr_code_value: Optional[str] = None # qr_codes 테이블에서 조인해 가져올 값
