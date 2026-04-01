@@ -4,15 +4,15 @@ from typing import Optional
 
 class QrCodeBase(BaseModel):
     qr_code: Optional[str] = None
-    steel_wip_id: Optional[int] = None
 
 class QrCodeCreate(QrCodeBase):
     pass
 
 class QrCodeUpdate(BaseModel):
-    steel_wip_id: Optional[int] = None
+    pass
 
 class QrCodeResponse(QrCodeBase):
     id: int
     
     model_config = ConfigDict(from_attributes=True)
+    
