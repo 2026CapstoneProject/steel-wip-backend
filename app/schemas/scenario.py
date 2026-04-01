@@ -1,34 +1,31 @@
+# schemas/scenario.py
 from pydantic import BaseModel, ConfigDict
 from typing import Optional
 from datetime import datetime
-from app.models import ScenarioStatus, LazerType
+from app.schemas.enums import ScenarioStatus, LazerType
 
-
-class ScenarioCreate(BaseModel):
+class ScenarioBase(BaseModel):
     title: str
-    creator_id: int
+    scenario_order: int = 0
+    status: ScenarioStatus = ScenarioStatus.DRAFT
+    scenario_due: datetime
     lazer_name: Optional[LazerType] = None
-    ordered_at: Optional[datetime] = None
+    project_id: Optional[int] = None
+    creator_id: Optional[int] = None
+    assignee_id: Optional[int] = None
 
+class ScenarioCreate(ScenarioBase):
+    pass
 
 class ScenarioUpdate(BaseModel):
-    title: Optional[str] = None
     status: Optional[ScenarioStatus] = None
-    assignee_id: Optional[int] = None
-    lazer_name: Optional[LazerType] = None
-    ordered_at: Optional[datetime] = None
+    scenario_order: Optional[int] = None
     completed_at: Optional[datetime] = None
 
-
-class ScenarioResponse(BaseModel):
+class ScenarioResponse(ScenarioBase):
     id: int
-    title: str
-    status: ScenarioStatus
-    creator_id: int
-    assignee_id: Optional[int] = None
-    lazer_name: Optional[LazerType] = None
     created_at: datetime
     ordered_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
-
+    
     model_config = ConfigDict(from_attributes=True)

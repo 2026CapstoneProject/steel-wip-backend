@@ -3,7 +3,7 @@ from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.routers import users, wips, scenarios
+from app.routers import users, wips
 
 app = FastAPI(title="철강 잔재 재고관리 API", version="1.0.0")
 
@@ -40,9 +40,8 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 # 2. 라우터 등록
 # ---------------------------------------------------------
 
-app.include_router(users.router, prefix="/users", tags=["Users"])
-app.include_router(wips.router, prefix="/wips", tags=["Steel WIPs"])
-app.include_router(scenarios.router, prefix="/scenarios", tags=["Scenarios"])
+app.include_router(users.router, prefix="/api/users", tags=["Users"])
+app.include_router(wips.router, prefix="/api/wips", tags=["Steel WIPs"])
 
 @app.get("/")
 async def root():
