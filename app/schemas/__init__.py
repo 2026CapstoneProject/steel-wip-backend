@@ -31,7 +31,7 @@ from .location import LocationBase, LocationCreate, LocationUpdate, LocationResp
 from .qr_code import QrCodeBase, QrCodeCreate, QrCodeUpdate, QrCodeResponse
 
 # 프로젝트 스키마
-from .project import ProjectBase, ProjectCreate, ProjectUpdate, ProjectResponse
+from .project import ProjectBase, ProjectCreate, ProjectUpdate, ProjectResponse, ProjectSearchData
 
 # 시나리오 스키마
 from .scenario import ScenarioBase, ScenarioCreate, ScenarioUpdate, ScenarioResponse
