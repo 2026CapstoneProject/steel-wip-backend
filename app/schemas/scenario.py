@@ -1,14 +1,15 @@
-# schemas/scenario.py
+# app/schemas/scenario.py
 from pydantic import BaseModel, ConfigDict
 from typing import Optional
-from datetime import datetime
+# datetime과 함께 date도 임포트
+from datetime import datetime, date 
 from app.schemas.enums import ScenarioStatus, LazerType
 
 class ScenarioBase(BaseModel):
     title: str
     scenario_order: int = 0
     status: ScenarioStatus = ScenarioStatus.DRAFT
-    scenario_due: datetime
+    scenario_due: date  # datetime -> date 수정
     lazer_name: Optional[LazerType] = None
     project_id: Optional[int] = None
     creator_id: Optional[int] = None

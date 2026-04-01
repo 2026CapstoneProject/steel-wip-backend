@@ -1,12 +1,10 @@
-from __future__ import annotations
 from typing import Optional
 import datetime
 import enum
 
-from sqlalchemy import DateTime, Enum, Float, ForeignKeyConstraint, Index, Integer, String, TIMESTAMP, text
+from sqlalchemy import Date, DateTime, Enum, Float, ForeignKeyConstraint, Index, Integer, String, TIMESTAMP, text
 from sqlalchemy.dialects.mysql import TINYINT
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
-
 
 class Base(DeclarativeBase):
     pass
@@ -84,55 +82,19 @@ class Projects(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
-    project_due: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=False)
-    emergency_or_not: Mapped[Optional[int]] = mapped_column(TINYINT(1), server_default=text("'0'"))
+    project_due: Mapped[datetime.date] = mapped_column(Date, nullable=False)
 
     scenarios: Mapped[list['Scenarios']] = relationship('Scenarios', back_populates='project')
 
 
 class QrCodes(Base):
     __tablename__ = 'qr_codes'
-    __table_args__ = (
-        ForeignKeyConstraint(['steel_wip_id'], ['steel_wip.id'], name='qr_codes_ibfk_1'),
-        Index('steel_wip_id', 'steel_wip_id')
-    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     qr_code: Mapped[Optional[str]] = mapped_column(String(255))
-    steel_wip_id: Mapped[Optional[int]] = mapped_column(Integer)
 
-    steel_wip: Mapped[Optional['SteelWip']] = relationship('SteelWip', foreign_keys=[steel_wip_id], back_populates='qr_codes_steel_wip')
-    steel_wip_qr: Mapped[list['SteelWip']] = relationship('SteelWip', foreign_keys='[SteelWip.qr_id]', back_populates='qr')
+    steel_wip: Mapped[list['SteelWip']] = relationship('SteelWip', back_populates='qr')
     estimated_wips: Mapped[list['EstimatedWips']] = relationship('EstimatedWips', back_populates='qr')
-
-
-class SteelWip(Base):
-    __tablename__ = 'steel_wip'
-    __table_args__ = (
-        ForeignKeyConstraint(['location_id'], ['locations.id'], name='steel_wip_ibfk_1'),
-        ForeignKeyConstraint(['qr_id'], ['qr_codes.id'], name='steel_wip_ibfk_2'),
-        Index('location_id', 'location_id'),
-        Index('qr_id', 'qr_id')
-    )
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    status: Mapped[SteelWipStatus] = mapped_column(Enum(SteelWipStatus, values_callable=lambda cls: [member.value for member in cls]), nullable=False, server_default=text("'REGISTERED'"), comment='재공품 현재 상태')
-    manufacturer: Mapped[str] = mapped_column(String(255), nullable=False)
-    material: Mapped[str] = mapped_column(String(255), nullable=False)
-    thickness: Mapped[float] = mapped_column(Float, nullable=False)
-    width: Mapped[float] = mapped_column(Float, nullable=False)
-    length: Mapped[float] = mapped_column(Float, nullable=False)
-    weight: Mapped[float] = mapped_column(Float, nullable=False)
-    location_id: Mapped[Optional[int]] = mapped_column(Integer, comment='현재 위치 (생산 라인 투입 시 null 처리 가능)')
-    stack_level: Mapped[Optional[int]] = mapped_column(Integer, comment='현재 적재 층')
-    qr_id: Mapped[Optional[int]] = mapped_column(Integer)
-
-    qr_codes_steel_wip: Mapped[list['QrCodes']] = relationship('QrCodes', foreign_keys='[QrCodes.steel_wip_id]', back_populates='steel_wip')
-    location: Mapped[Optional['Locations']] = relationship('Locations', back_populates='steel_wip')
-    qr: Mapped[Optional['QrCodes']] = relationship('QrCodes', foreign_keys=[qr_id], back_populates='steel_wip_qr')
-    steel_wip_history: Mapped[list['SteelWipHistory']] = relationship('SteelWipHistory', back_populates='steel_wip')
-    batch_items: Mapped[list['BatchItems']] = relationship('BatchItems', back_populates='steel_wip')
-    lazer_cutting: Mapped[list['LazerCutting']] = relationship('LazerCutting', back_populates='steel_wip')
 
 
 class Users(Base):
@@ -162,7 +124,7 @@ class Scenarios(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[ScenariosStatus] = mapped_column(Enum(ScenariosStatus, values_callable=lambda cls: [member.value for member in cls]), nullable=False, server_default=text("'DRAFT'"))
-    scenario_due: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=False)
+    scenario_due: Mapped[datetime.date] = mapped_column(Date, nullable=False)
     scenario_order: Mapped[Optional[int]] = mapped_column(Integer, server_default=text("'0'"))
     created_at: Mapped[Optional[datetime.datetime]] = mapped_column(TIMESTAMP, server_default=text('(now())'))
     ordered_at: Mapped[Optional[datetime.datetime]] = mapped_column(TIMESTAMP)
@@ -171,12 +133,58 @@ class Scenarios(Base):
     project_id: Mapped[Optional[int]] = mapped_column(Integer)
     creator_id: Mapped[Optional[int]] = mapped_column(Integer)
     assignee_id: Mapped[Optional[int]] = mapped_column(Integer)
+    emergency_or_not: Mapped[Optional[int]] = mapped_column(TINYINT(1), server_default=text("'0'"))
 
     assignee: Mapped[Optional['Users']] = relationship('Users', foreign_keys=[assignee_id], back_populates='scenarios_assignee')
     creator: Mapped[Optional['Users']] = relationship('Users', foreign_keys=[creator_id], back_populates='scenarios_creator')
     project: Mapped[Optional['Projects']] = relationship('Projects', back_populates='scenarios')
     batch: Mapped[list['Batch']] = relationship('Batch', back_populates='scenario')
     lazer_cutting: Mapped[list['LazerCutting']] = relationship('LazerCutting', back_populates='scenario')
+
+
+class SteelWip(Base):
+    __tablename__ = 'steel_wip'
+    __table_args__ = (
+        ForeignKeyConstraint(['location_id'], ['locations.id'], name='steel_wip_ibfk_1'),
+        ForeignKeyConstraint(['qr_id'], ['qr_codes.id'], name='steel_wip_ibfk_2'),
+        Index('location_id', 'location_id'),
+        Index('qr_id', 'qr_id')
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    status: Mapped[SteelWipStatus] = mapped_column(Enum(SteelWipStatus, values_callable=lambda cls: [member.value for member in cls]), nullable=False, server_default=text("'REGISTERED'"), comment='재공품 현재 상태')
+    material: Mapped[str] = mapped_column(String(255), nullable=False)
+    thickness: Mapped[float] = mapped_column(Float, nullable=False)
+    width: Mapped[float] = mapped_column(Float, nullable=False)
+    length: Mapped[float] = mapped_column(Float, nullable=False)
+    weight: Mapped[float] = mapped_column(Float, nullable=False)
+    manufacturer: Mapped[Optional[str]] = mapped_column(String(255))
+    location_id: Mapped[Optional[int]] = mapped_column(Integer, comment='현재 위치 (생산 라인 투입 시 null 처리 가능)')
+    stack_level: Mapped[Optional[int]] = mapped_column(Integer, comment='현재 적재 층')
+    qr_id: Mapped[Optional[int]] = mapped_column(Integer)
+
+    location: Mapped[Optional['Locations']] = relationship('Locations', back_populates='steel_wip')
+    qr: Mapped[Optional['QrCodes']] = relationship('QrCodes', back_populates='steel_wip')
+    steel_wip_history: Mapped[list['SteelWipHistory']] = relationship('SteelWipHistory', back_populates='steel_wip')
+    batch_items: Mapped[list['BatchItems']] = relationship('BatchItems', back_populates='steel_wip')
+    lazer_cutting: Mapped[list['LazerCutting']] = relationship('LazerCutting', back_populates='steel_wip')
+
+
+class Batch(Base):
+    __tablename__ = 'batch'
+    __table_args__ = (
+        ForeignKeyConstraint(['scenario_id'], ['scenarios.id'], name='batch_ibfk_1'),
+        Index('scenario_id', 'scenario_id')
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    scenario_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    batch_order: Mapped[int] = mapped_column(Integer, nullable=False)
+    completed_at: Mapped[Optional[datetime.datetime]] = mapped_column(TIMESTAMP)
+
+    scenario: Mapped['Scenarios'] = relationship('Scenarios', back_populates='batch')
+    batch_items: Mapped[list['BatchItems']] = relationship('BatchItems', back_populates='batch')
+    lazer_cutting: Mapped[list['LazerCutting']] = relationship('LazerCutting', back_populates='batch')
 
 
 class SteelWipHistory(Base):
@@ -197,23 +205,6 @@ class SteelWipHistory(Base):
 
     locations: Mapped[Optional['Locations']] = relationship('Locations', back_populates='steel_wip_history')
     steel_wip: Mapped['SteelWip'] = relationship('SteelWip', back_populates='steel_wip_history')
-
-
-class Batch(Base):
-    __tablename__ = 'batch'
-    __table_args__ = (
-        ForeignKeyConstraint(['scenario_id'], ['scenarios.id'], name='batch_ibfk_1'),
-        Index('scenario_id', 'scenario_id')
-    )
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    scenario_id: Mapped[int] = mapped_column(Integer, nullable=False)
-    batch_order: Mapped[int] = mapped_column(Integer, nullable=False)
-    completed_at: Mapped[Optional[datetime.datetime]] = mapped_column(TIMESTAMP)
-
-    scenario: Mapped['Scenarios'] = relationship('Scenarios', back_populates='batch')
-    batch_items: Mapped[list['BatchItems']] = relationship('BatchItems', back_populates='batch')
-    lazer_cutting: Mapped[list['LazerCutting']] = relationship('LazerCutting', back_populates='batch')
 
 
 class BatchItems(Base):
