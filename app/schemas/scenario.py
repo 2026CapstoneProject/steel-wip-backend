@@ -30,3 +30,9 @@ class ScenarioResponse(ScenarioBase):
     completed_at: Optional[datetime] = None
     
     model_config = ConfigDict(from_attributes=True)
+
+class ScenarioCreateRequest(BaseModel):
+    project_id: int
+    scenario_due: date
+    # 필요하다면 lazer_name 등도 받을 수 있지만 일단 필수값만 정의
+    lazer_name: Optional[str] = "LAZER1"
