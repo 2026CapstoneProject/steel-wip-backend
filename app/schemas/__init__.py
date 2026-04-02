@@ -47,3 +47,5 @@ from .lazer_cutting import LazerCuttingBase, LazerCuttingCreate, LazerCuttingUpd
 
 # 예상 잔재 (Estimated WIP) 스키마
 from .estimated_wip import EstimatedWipBase, EstimatedWipCreate, EstimatedWipUpdate, EstimatedWipResponse
+
+from .lantek import LantekScenarioData, LantekDeleteRequest

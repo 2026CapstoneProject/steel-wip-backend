@@ -276,11 +276,13 @@ class EstimatedWips(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     lazer_cutting_id: Mapped[Optional[int]] = mapped_column(Integer)
-    estimated_wip_thickness: Mapped[Optional[float]] = mapped_column(Float, comment='트리거로 기존 WIP의 재고 정보 활용')
-    estimated_wip_width: Mapped[Optional[float]] = mapped_column(Float)
-    estimated_wip_length: Mapped[Optional[float]] = mapped_column(Float)
-    estimated_wip_weight: Mapped[Optional[float]] = mapped_column(Float, comment='트리거로 철강 무게 계산')
     qr_id: Mapped[Optional[int]] = mapped_column(Integer)
+    manufacturer: Mapped[Optional[str]] = mapped_column(String(255))
+    material: Mapped[Optional[str]] = mapped_column(String(255))
+    thickness: Mapped[Optional[float]] = mapped_column(Float)
+    width: Mapped[Optional[float]] = mapped_column(Float)
+    length: Mapped[Optional[float]] = mapped_column(Float)
+    weight: Mapped[Optional[float]] = mapped_column(Float)
 
     lazer_cutting: Mapped[Optional['LazerCutting']] = relationship('LazerCutting', back_populates='estimated_wips')
     qr: Mapped[Optional['QrCodes']] = relationship('QrCodes', back_populates='estimated_wips')
