@@ -1,6 +1,6 @@
 # app/schemas/scenario.py
 from pydantic import BaseModel, ConfigDict
-from typing import Optional
+from typing import List,Optional
 # datetime과 함께 date도 임포트
 from datetime import datetime, date 
 from app.schemas.enums import ScenarioStatus, LazerType
@@ -36,3 +36,31 @@ class ScenarioCreateRequest(BaseModel):
     scenario_due: date
     # 필요하다면 lazer_name 등도 받을 수 있지만 일단 필수값만 정의
     lazer_name: Optional[str] = "LAZER1"
+
+
+
+class BatchItemDetail(BaseModel):
+    batchItemAction: str
+    steelWipId: int
+    manufacturer: str
+    material: str
+    thickness: float
+    width: float
+    length: float
+    weight: float
+    fromLocation: Optional[str] = None
+    toLocation: Optional[str] = None
+    expectedStartTime: int
+
+class ScenarioResultData(BaseModel):
+    projectId: int
+    projectTitle: str
+    scenarioId: int
+    scenarioTitle: str
+    scenarioDue: date
+    lazerName: str
+    totalCuttingTime: int
+    totalWipNum: int
+    totalCraneMove: int
+    totalMoveNum: int
+    batchItems: List[BatchItemDetail]

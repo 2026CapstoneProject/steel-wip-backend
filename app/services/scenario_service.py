@@ -5,6 +5,16 @@ from datetime import date, datetime
 
 from app.models import Projects, Scenarios
 
+# app/services/scenario_service.py
+from sqlalchemy import func, update, delete
+from sqlalchemy.orm import selectinload
+from app.models import (
+    Projects, Scenarios, LazerCutting, Batch, BatchItems, 
+    SteelWip, Locations, EstimatedWips, QrCodes
+)
+from app.schemas.scenario import ScenarioResultData, BatchItemDetail
+from app.schemas.enums import BatchActionType
+
 async def get_or_create_scenario(db: AsyncSession, project_id: int, scenario_due: date) -> Scenarios:
     # 1. 동일한 프로젝트 + 동일한 due를 가진 시나리오가 이미 있는지 확인
     stmt_existing = select(Scenarios).where(
@@ -51,3 +61,142 @@ async def get_or_create_scenario(db: AsyncSession, project_id: int, scenario_due
     
     return new_scenario
 
+
+
+async def get_scenario_result(db: AsyncSession, scenario_id: int) -> list:
+    """GET: 시나리오 결과 및 배치 통계 조회"""
+    # 1. 시나리오 및 프로젝트 정보
+    stmt = select(Scenarios, Projects).join(Projects).where(Scenarios.id == scenario_id)
+    row = (await db.execute(stmt)).first()
+    if not row:
+        return []
+    scenario, project = row
+
+    # 2. 총 절단 시간 계산 (LazerCutting)
+    cutting_stmt = select(func.sum(LazerCutting.estimated_cutting_time)).where(LazerCutting.scenario_id == scenario_id)
+    total_cutting_time = (await db.execute(cutting_stmt)).scalar() or 0
+
+    # 3. Batch 및 BatchItems 조회 (WIP, Location 정보 포함)
+    batch_stmt = select(Batch).where(Batch.scenario_id == scenario_id)
+    batches = (await db.execute(batch_stmt)).scalars().all()
+    batch_ids = [b.id for b in batches]
+
+    batch_items = []
+    total_wip_num = 0
+    total_move_num = 0
+
+    if batch_ids:
+        items_stmt = select(BatchItems).where(BatchItems.batch_id.in_(batch_ids)).order_by(BatchItems.expected_start_time)
+        items_result = (await db.execute(items_stmt)).scalars().all()
+
+        for item in items_result:
+            total_move_num += 1
+            if item.batch_item_action == BatchActionType.PICKING.value:
+                total_wip_num += 1
+
+            # WIP 정보
+            wip = await db.get(SteelWip, item.steel_wip_id) if item.steel_wip_id else None
+            
+            # Location 명칭 치환
+            from_loc = await db.get(Locations, item.from_location) if item.from_location else None
+            to_loc = await db.get(Locations, item.to_location) if item.to_location else None
+
+            # Action 이름 한글 매핑
+            action_name = "재배치" if item.batch_item_action == "RELOCATE" else "피킹" if item.batch_item_action == "PICKING" else "적재"
+
+            batch_items.append(BatchItemDetail(
+                batchItemAction=action_name,
+                steelWipId=wip.id if wip else 0,
+                manufacturer=wip.manufacturer if wip else "알수없음",
+                material=wip.material if wip else "알수없음",
+                thickness=wip.thickness if wip else 0.0,
+                width=wip.width if wip else 0.0,
+                length=wip.length if wip else 0.0,
+                weight=wip.weight if wip else 0.0,
+                fromLocation=from_loc.loc_name if from_loc else None,
+                toLocation=to_loc.loc_name if to_loc else None,
+                expectedStartTime=item.expected_start_time
+            ))
+
+    # 더미 계산: 재배치 후 피킹 크레인 교체 이동 횟수 (단순화: 총 이동 횟수 * 1.5 등 로직에 맞게 조정 가능)
+    total_crane_move = total_move_num + total_wip_num 
+
+    result_data = ScenarioResultData(
+        projectId=project.id,
+        projectTitle=project.title,
+        scenarioId=scenario.id,
+        scenarioTitle=scenario.title,
+        scenarioDue=scenario.scenario_due,
+        lazerName=scenario.lazer_name.value if scenario.lazer_name else "LAZER1",
+        totalCuttingTime=total_cutting_time,
+        totalWipNum=total_wip_num,
+        totalCraneMove=total_crane_move,
+        totalMoveNum=total_move_num,
+        batchItems=batch_items
+    )
+    
+    return [result_data]
+
+async def publish_scenario(db: AsyncSession, scenario_id: int):
+    """POST: 시나리오 발행 (상태값 변경 트랜잭션)"""
+    # 1. 시나리오 상태 변경 (DRAFT -> ORDERED)
+    scenario = await db.get(Scenarios, scenario_id)
+    if not scenario:
+        raise ValueError("시나리오를 찾을 수 없습니다.")
+    scenario.status = "ORDERED"
+
+    # 2. Batch 조회
+    batches = (await db.execute(select(Batch.id).where(Batch.scenario_id == scenario_id))).scalars().all()
+    if not batches:
+        await db.commit()
+        return
+
+    # 3. BatchItems (PICKING인 것들만) 상태 변경
+    items_stmt = select(BatchItems).where(
+        BatchItems.batch_id.in_(batches),
+        BatchItems.batch_item_action == BatchActionType.PICKING.value
+    )
+    picking_items = (await db.execute(items_stmt)).scalars().all()
+    wip_ids = []
+
+    for item in picking_items:
+        item.status = "PENDING"
+        if item.steel_wip_id:
+            wip_ids.append(item.steel_wip_id)
+
+    # 4. 연결된 SteelWip 상태 변경 (IN_STOCK -> RESERVATED)
+    if wip_ids:
+        await db.execute(
+            update(SteelWip)
+            .where(SteelWip.id.in_(wip_ids))
+            .values(status="RESERVATED")
+        )
+
+    await db.commit()
+
+async def delete_scenario_cascade(db: AsyncSession, scenario_id: int):
+    """DELETE: 시나리오 및 종속된 모든 데이터 삭제"""
+    scenario = await db.get(Scenarios, scenario_id)
+    if not scenario:
+        raise ValueError("시나리오를 찾을 수 없습니다.")
+
+    # 1. LazerCutting, EstimatedWips, QrCodes 삭제
+    cuttings = (await db.execute(select(LazerCutting.id).where(LazerCutting.scenario_id == scenario_id))).scalars().all()
+    if cuttings:
+        wips = (await db.execute(select(EstimatedWips.qr_id).where(EstimatedWips.lazer_cutting_id.in_(cuttings)))).scalars().all()
+        qr_ids = [q for q in wips if q]
+        
+        await db.execute(delete(EstimatedWips).where(EstimatedWips.lazer_cutting_id.in_(cuttings)))
+        if qr_ids:
+            await db.execute(delete(QrCodes).where(QrCodes.id.in_(qr_ids)))
+        await db.execute(delete(LazerCutting).where(LazerCutting.scenario_id == scenario_id))
+
+    # 2. Batch, BatchItems 삭제
+    batches = (await db.execute(select(Batch.id).where(Batch.scenario_id == scenario_id))).scalars().all()
+    if batches:
+        await db.execute(delete(BatchItems).where(BatchItems.batch_id.in_(batches)))
+        await db.execute(delete(Batch).where(Batch.scenario_id == scenario_id))
+
+    # 3. 최상위 시나리오 삭제
+    await db.delete(scenario)
+    await db.commit()
