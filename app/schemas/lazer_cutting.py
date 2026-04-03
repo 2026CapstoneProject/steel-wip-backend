@@ -1,7 +1,6 @@
 # schemas/lazer_cutting.py
 from pydantic import BaseModel, ConfigDict
 from typing import Optional
-from datetime import datetime
 from app.schemas.enums import CuttingStatus, CuttingPriority
 
 class LazerCuttingBase(BaseModel):
@@ -12,17 +11,17 @@ class LazerCuttingBase(BaseModel):
     batch_id: Optional[int] = None
 
 class LazerCuttingCreate(LazerCuttingBase):
-    estimated_cutting_time: Optional[datetime] = None
+    estimated_cutting_time: Optional[int] = None
 
 class LazerCuttingUpdate(BaseModel):
     priority: Optional[CuttingPriority] = None
     status: Optional[CuttingStatus] = None
-    real_cutting_time: Optional[datetime] = None
+    real_cutting_time: Optional[int] = None
     batch_id: Optional[int] = None
 
 class LazerCuttingResponse(LazerCuttingBase):
     id: int
-    estimated_cutting_time: Optional[datetime] = None
-    real_cutting_time: Optional[datetime] = None
+    estimated_cutting_time: Optional[int] = None
+    real_cutting_time: Optional[int] = None
     
     model_config = ConfigDict(from_attributes=True)
