@@ -50,3 +50,4 @@ async def get_or_create_scenario(db: AsyncSession, project_id: int, scenario_due
     await db.refresh(new_scenario)
     
     return new_scenario
+
