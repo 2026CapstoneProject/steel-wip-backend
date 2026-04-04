@@ -161,42 +161,7 @@ async def get_scenario_result(db: AsyncSession, scenario_id: int) -> list:
     
     return [result_data]
 
-async def publish_scenario(db: AsyncSession, scenario_id: int):
-    """POST: 시나리오 발행 (상태값 변경 트랜잭션)"""
-    # 1. 시나리오 상태 변경 (DRAFT -> ORDERED)
-    scenario = await db.get(Scenarios, scenario_id)
-    if not scenario:
-        raise ValueError("시나리오를 찾을 수 없습니다.")
-    scenario.status = "ORDERED"
 
-    # 2. Batch 조회
-    batches = (await db.execute(select(Batch.id).where(Batch.scenario_id == scenario_id))).scalars().all()
-    if not batches:
-        await db.commit()
-        return
-
-    # 3. BatchItems (PICKING인 것들만) 상태 변경
-    items_stmt = select(BatchItems).where(
-        BatchItems.batch_id.in_(batches),
-        BatchItems.batch_item_action == BatchActionType.PICKING.value
-    )
-    picking_items = (await db.execute(items_stmt)).scalars().all()
-    wip_ids = []
-
-    for item in picking_items:
-        item.status = "PENDING"
-        if item.steel_wip_id:
-            wip_ids.append(item.steel_wip_id)
-
-    # 4. 연결된 SteelWip 상태 변경 (IN_STOCK -> RESERVATED)
-    if wip_ids:
-        await db.execute(
-            update(SteelWip)
-            .where(SteelWip.id.in_(wip_ids))
-            .values(status="RESERVATED")
-        )
-
-    await db.commit()
 
 async def delete_scenario_cascade(db: AsyncSession, scenario_id: int):
     """DELETE: 시나리오 및 종속된 모든 데이터 삭제"""
