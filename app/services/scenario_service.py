@@ -20,43 +20,63 @@ from app.schemas.scenario import ScenarioHistoryItem, ProjectScenarioHistory, Se
 from app.schemas.batch_item import BatchItemStatus
 
 async def get_or_create_scenario(db: AsyncSession, project_id: int, scenario_due: date) -> Scenarios:
-    # 1. 동일한 프로젝트 + 동일한 due를 가진 시나리오가 이미 있는지 확인
+    """
+    POST: 생산계획명 생성 로직 (수정됨)
+    - 동일한 프로젝트 + due를 가진 시나리오 중 status가 None인 것이 있다면 재사용
+    - 만약 status가 None이 아닌 것만 존재한다면, 가장 최근의 시나리오 title을 그대로 복사하여 
+      status=None 인 새로운 시나리오(비교군)를 생성
+    """
+    
+    # 1. 동일한 프로젝트 + 동일한 due를 가진 시나리오들을 최신순으로 모두 조회
     stmt_existing = select(Scenarios).where(
         Scenarios.project_id == project_id,
         Scenarios.scenario_due == scenario_due
-    )
-    result = await db.execute(stmt_existing)
-    existing_scenario = result.scalars().first()
+    ).order_by(Scenarios.id.desc())
     
-    # 이미 존재한다면 새로 만들지 않고 그대로 반환
-    if existing_scenario:
-        return existing_scenario
-        
-    # 2. 존재하지 않는다면, 해당 프로젝트의 이름을 조회
+    result = await db.execute(stmt_existing)
+    existing_scenarios = result.scalars().all()
+    
+    # 2. 조회된 시나리오 중 status가 None인 시나리오가 있는지 확인 (가장 최신 것 1개)
+    #    (None이면 아직 진행되지 않은 껍데기이므로 그대로 재사용)
+    for scenario in existing_scenarios:
+        if scenario.status is None:
+            return scenario
+            
+    # 3. 만약 모두 status가 None이 아니라면(이미 진행 중이라면)
+    #    혹은 아예 일치하는 시나리오가 없다면 새로 생성해야 함.
+    
     project = await db.get(Projects, project_id)
     if not project:
         raise ValueError("해당 프로젝트를 찾을 수 없습니다.")
         
-    # 3. 해당 프로젝트에 종속된 기존 시나리오가 몇 개 있는지(N) 세어서 N+1 생성
-    # title을 project_title-1, project_title-2 형식으로 맞추기 위함
-    stmt_count = select(func.count(Scenarios.id)).where(Scenarios.project_id == project_id)
-    count_result = await db.execute(stmt_count)
-    scenario_count = count_result.scalar() or 0
+    # 새 타이틀 결정 로직
+    new_title = ""
+    if existing_scenarios:
+        # 기존 시나리오가 있다면, 동일한 title(가장 최신 것 기준)을 그대로 복사
+        new_title = existing_scenarios[0].title
+    else:
+        # 아예 처음 만드는 due 라면 새로 넘버링(N+1)하여 title 생성
+        # (이 프로젝트에 속한 '고유한 title'의 개수를 세어 N+1을 붙임)
+        stmt_count = select(func.count(func.distinct(Scenarios.title))).where(
+            Scenarios.project_id == project_id
+        )
+        count_result = await db.execute(stmt_count)
+        unique_title_count = count_result.scalar() or 0
+        new_title = f"{project.title}-{unique_title_count + 1}"
     
-    new_title = f"{project.title}-{scenario_count + 1}"
-    
-    # 4. 새 시나리오 생성 (creator_id=1, assignee_id=2 하드코딩 반영)
+    # 4. 새 시나리오 생성 (비교군 또는 신규)
+    # status는 명시하지 않거나 None으로 두어 DB default(None)가 되도록 함.
     new_scenario = Scenarios(
         title=new_title,
         scenario_order=0,
-        status="DRAFT",
+        status=None,  # 수정됨: DRAFT 대신 None으로 초기화
         created_at=datetime.now(),
         scenario_due=scenario_due,
         lazer_name="LAZER1",
         emergency_or_not=False,
         project_id=project_id,
-        creator_id=1,   # 명세서 요청사항 반영
-        assignee_id=2   # 명세서 요청사항 반영
+        creator_id=1,   
+        assignee_id=2   
     )
     
     db.add(new_scenario)
