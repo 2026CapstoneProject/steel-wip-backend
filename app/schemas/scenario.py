@@ -1,5 +1,6 @@
 # app/schemas/scenario.py
 from pydantic import BaseModel, ConfigDict
+from pydantic import Field
 from typing import List,Optional
 # datetime과 함께 date도 임포트
 from datetime import datetime, date 
@@ -64,3 +65,23 @@ class ScenarioResultData(BaseModel):
     totalCraneMove: int
     totalMoveNum: int
     batchItems: List[BatchItemDetail]
+
+# app/schemas/scenario.py (기존 내용 하단에 추가)
+
+class ScenarioHistoryItem(BaseModel):
+    id: int
+    title: str
+    due: date
+    lazerName: str
+    selectedWips: int
+    # 파이썬 변수명에는 #을 쓸 수 없으므로 alias(별칭)를 사용하여 JSON 키를 강제 지정합니다.
+    num_relocation: int = Field(alias="#relocation")
+    num_crane: int = Field(alias="#crane")
+    totalMinute: int
+
+    model_config = ConfigDict(populate_by_name=True)
+
+class ProjectScenarioHistory(BaseModel):
+    projectId: int
+    projectTitle: str
+    scenario: List[ScenarioHistoryItem]
