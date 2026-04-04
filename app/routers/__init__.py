@@ -9,3 +9,4 @@ from .lantek import router as lantek_router
 from .scenarios import router as scenario_router
 from .scheduler import router as scheduler_router
 from .scenario_cart import router as scenario_cart_router
+from .scenario_send import router as scenario_send_router
