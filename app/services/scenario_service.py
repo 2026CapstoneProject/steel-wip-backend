@@ -16,7 +16,7 @@ from app.models import (
 from app.schemas.scenario import ScenarioResultData, BatchItemDetail
 from app.schemas.enums import BatchActionType
 
-from app.schemas.scenario import ScenarioHistoryItem, ProjectScenarioHistory
+from app.schemas.scenario import ScenarioHistoryItem, ProjectScenarioHistory, SentScenarioItem, SentProjectHistory
 from app.schemas.batch_item import BatchItemStatus
 
 async def get_or_create_scenario(db: AsyncSession, project_id: int, scenario_due: date) -> Scenarios:
@@ -358,3 +358,85 @@ async def send_scenario_to_field(db: AsyncSession, scenario_id: int):
         await delete_scenario_cascade(db, other_id)
         
     await db.commit()
+
+# app/services/scenario_service.py 하단에 추가
+
+async def get_sent_scenario_history(
+    db: AsyncSession,
+    project_name: Optional[str] = None,
+    proj_due_min: Optional[date] = None,
+    proj_due_max: Optional[date] = None,
+    scen_due_min: Optional[date] = None,
+    scen_due_max: Optional[date] = None,
+    send_date_min: Optional[date] = None,
+    send_date_max: Optional[date] = None
+) -> list:
+    """GET: 현장에 전송된 시나리오 이력 다중 필터링 및 통계 조회"""
+    
+    # 1. 기본 조인 쿼리 (Scenarios + Projects)
+    # DRAFT가 아닌(ORDERED, IN_PROGRESS, COMPLETED) 시나리오만 조회합니다.
+    stmt = (
+        select(Scenarios, Projects)
+        .join(Projects, Scenarios.project_id == Projects.id)
+        .where(Scenarios.status != "DRAFT")
+    )
+    
+    # 2. 동적 필터링 적용
+    if project_name:
+        stmt = stmt.where(Projects.title.ilike(f"%{project_name}%"))
+        
+    if proj_due_min:
+        stmt = stmt.where(Projects.project_due >= proj_due_min)
+    if proj_due_max:
+        stmt = stmt.where(Projects.project_due <= proj_due_max)
+        
+    if scen_due_min:
+        stmt = stmt.where(Scenarios.scenario_due >= scen_due_min)
+    if scen_due_max:
+        stmt = stmt.where(Scenarios.scenario_due <= scen_due_max)
+        
+    # send_date는 datetime(ordered_at) 기준입니다.
+    if send_date_min:
+        stmt = stmt.where(Scenarios.ordered_at >= datetime.combine(send_date_min, datetime.min.time()))
+    if send_date_max:
+        stmt = stmt.where(Scenarios.ordered_at <= datetime.combine(send_date_max, datetime.max.time()))
+
+    result = await db.execute(stmt)
+    rows = result.all()
+
+    # 3. 프로젝트 기준으로 데이터 그룹화 및 통계 계산
+    projects_map = {}
+    
+    for scenario, project in rows:
+        if project.id not in projects_map:
+            projects_map[project.id] = {
+                "projectId": project.id,
+                "projectTitle": project.title,
+                "projectDue": project.project_due,
+                "scenarios": []
+            }
+            
+        # [통계] 해당 시나리오에 포함된 PICKING 작업 개수 산출 (투입 WIPS 개수)
+        batch_stmt = (
+            select(func.count(BatchItems.id))
+            .join(Batch, BatchItems.batch_id == Batch.id)
+            .where(
+                Batch.scenario_id == scenario.id,
+                BatchItems.batch_item_action == BatchActionType.PICKING.value
+            )
+        )
+        num_input_wip = (await db.execute(batch_stmt)).scalar() or 0
+        
+        # 시나리오 데이터 조립
+        scenario_item = SentScenarioItem(
+            scenarioId=scenario.id,
+            scenarioTitle=scenario.title,
+            scenarioDue=scenario.scenario_due,
+            orderedAt=scenario.ordered_at or scenario.created_at, # 예외 방지용 fallback
+            numInputWip=num_input_wip
+        )
+        
+        projects_map[project.id]["scenarios"].append(scenario_item)
+
+    # 4. Dictionary를 List 객체 형태로 반환
+    return [SentProjectHistory(**data) for data in projects_map.values()]

@@ -34,7 +34,7 @@ from .qr_code import QrCodeBase, QrCodeCreate, QrCodeUpdate, QrCodeResponse
 from .project import ProjectBase, ProjectCreate, ProjectUpdate, ProjectResponse, ProjectSearchData
 
 # 시나리오 스키마
-from .scenario import ScenarioBase, ScenarioCreate, ScenarioUpdate, ScenarioResponse
+from .scenario import ScenarioBase, ScenarioCreate, ScenarioUpdate, ScenarioResponse, SentScenarioItem, SentProjectHistory
 
 # 배치 작업 스키마
 from .batch import BatchBase, BatchCreate, BatchUpdate, BatchResponse
