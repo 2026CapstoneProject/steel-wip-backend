@@ -123,7 +123,7 @@ class Scenarios(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
-    status: Mapped[ScenariosStatus] = mapped_column(Enum(ScenariosStatus, values_callable=lambda cls: [member.value for member in cls]), nullable=False, server_default=text("'DRAFT'"))
+    status: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, default=None)
     scenario_due: Mapped[datetime.date] = mapped_column(Date, nullable=False)
     scenario_order: Mapped[Optional[int]] = mapped_column(Integer, server_default=text("'0'"))
     created_at: Mapped[Optional[datetime.datetime]] = mapped_column(TIMESTAMP, server_default=text('(now())'))
