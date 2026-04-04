@@ -315,14 +315,17 @@ async def get_scenario_history(
     return [ProjectScenarioHistory(**data) for data in projects_map.values()]
 
 
-# app/services/scenario_service.py 하단에 추가
+# app/services/scenario_service.py 내 함수 교체
+from sqlalchemy import update, select
+from datetime import datetime
+
 async def send_scenario_to_field(db: AsyncSession, scenario_id: int):
     """
-    POST: 시나리오 현장 전송
+    POST: 시나리오 현장 전송 (발행)
     1. 선택된 시나리오 상태 ORDERED 변경 및 ordered_at 기록
     2. 연관된 BatchItems(PICKING) 상태 PENDING 변경
     3. 연관된 SteelWip 상태 RESERVATED 변경
-    4. 동일한 title을 가졌지만 선택되지 않은 다른 DRAFT 시나리오 삭제
+    4. 동일한 title을 가졌지만 선택되지 않은 다른 시나리오들 삭제
     """
     # 1. 대상 시나리오 조회 및 유효성 검사
     scenario = await db.get(Scenarios, scenario_id)
@@ -332,11 +335,13 @@ async def send_scenario_to_field(db: AsyncSession, scenario_id: int):
     if scenario.status != "DRAFT":
         raise ValueError("대기(DRAFT) 상태인 시나리오만 전송할 수 있습니다.")
 
+    # 삭제 대상을 찾기 위해 title 미리 저장
     target_title = scenario.title
     
-    # 2. 선택된 시나리오 상태 변경
+    # 2. 선택된 시나리오 상태 및 발행 시각 변경
     scenario.status = "ORDERED"
-    scenario.ordered_at = datetime.now()
+    scenario.ordered_at = datetime.now() # 확실하게 현재 시각 기록
+    db.add(scenario) # 세션에 명시적으로 추가 (세션 관리에 따라 누락될 수 있으므로 방어 코드)
     
     # 3. Batch 조회
     batch_stmt = select(Batch.id).where(Batch.scenario_id == scenario_id)
@@ -353,32 +358,34 @@ async def send_scenario_to_field(db: AsyncSession, scenario_id: int):
         wip_ids = []
         for item in picking_items:
             item.status = BatchItemStatus.PENDING.value
+            db.add(item)
             if item.steel_wip_id:
                 wip_ids.append(item.steel_wip_id)
                 
-        # 5. 연결된 SteelWip 상태 RESERVATED로 예약 변경
+        # 5. 연결된 원본 SteelWip 상태 RESERVATED로 예약 변경
         if wip_ids:
             await db.execute(
                 update(SteelWip)
                 .where(SteelWip.id.in_(wip_ids))
-                .values(status="RESERVATED")
+                .values(status=WipStatus.RESERVATED.value)
             )
             
-    # 6. 동일한 title을 가졌지만 선택받지 못한 다른 DRAFT 시나리오들 조회
+    # 6. 동일한 title을 가졌지만 선택받지 못한 다른 시나리오들 조회
+    # (주의: status가 DRAFT인 것뿐만 아니라 앞선 2단계 로직에 의해 빈 껍데기(None)인 상태도 포함해야 합니다!)
     other_scenarios_stmt = select(Scenarios.id).where(
         Scenarios.title == target_title,
         Scenarios.id != scenario_id,
-        Scenarios.status == "DRAFT"
+        Scenarios.status.in_(["DRAFT", None]) # DRAFT 이거나 None(껍데기) 인 것 모두 조회
     )
     other_scenario_ids = (await db.execute(other_scenarios_stmt)).scalars().all()
     
-    # 7. 버려진 시나리오들 연쇄 삭제 (이전 삭제 로직 활용)
+    # 7. 버려진 시나리오들 연쇄 삭제
     for other_id in other_scenario_ids:
-        # 이미 작성되어 있는 delete_scenario_cascade 함수를 재활용하여 하위 데이터까지 싹 지웁니다.
+        # 기존에 작성하신 delete_scenario_cascade 함수 호출
         await delete_scenario_cascade(db, other_id)
         
+    # 모든 변경사항(상태 업데이트, 시간 기록, 미선택 데이터 삭제)을 한 번에 Commit
     await db.commit()
-
 # app/services/scenario_service.py 하단에 추가
 
 async def get_sent_scenario_history(
