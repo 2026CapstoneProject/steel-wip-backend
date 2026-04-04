@@ -1,6 +1,6 @@
 # app/services/scenario_service.py 생성
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, or_ 
 from datetime import date, datetime, timedelta
 from typing import Optional
 
@@ -18,6 +18,7 @@ from app.schemas.enums import BatchActionType
 
 from app.schemas.scenario import ScenarioHistoryItem, ProjectScenarioHistory, SentScenarioItem, SentProjectHistory
 from app.schemas.batch_item import BatchItemStatus
+from app.schemas.wip import WipStatus
 
 async def get_or_create_scenario(db: AsyncSession, project_id: int, scenario_due: date) -> Scenarios:
     """
@@ -340,7 +341,10 @@ async def send_scenario_to_field(db: AsyncSession, scenario_id: int):
     other_scenarios_stmt = select(Scenarios.id).where(
         Scenarios.title == target_title,
         Scenarios.id != scenario_id,
-        Scenarios.status.in_(["DRAFT", None]) # DRAFT 이거나 None(껍데기) 인 것 모두 조회
+        or_(
+            Scenarios.status == "DRAFT",
+            Scenarios.status.is_(None)  # is_(None)을 통해 확실한 IS NULL 쿼리 생성
+        )
     )
     other_scenario_ids = (await db.execute(other_scenarios_stmt)).scalars().all()
     
