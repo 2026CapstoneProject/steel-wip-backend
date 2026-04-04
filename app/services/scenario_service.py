@@ -1,7 +1,8 @@
 # app/services/scenario_service.py 생성
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+from typing import Optional
 
 from app.models import Projects, Scenarios
 
@@ -14,6 +15,9 @@ from app.models import (
 )
 from app.schemas.scenario import ScenarioResultData, BatchItemDetail
 from app.schemas.enums import BatchActionType
+
+from app.schemas.scenario import ScenarioHistoryItem, ProjectScenarioHistory, SentScenarioItem, SentProjectHistory
+from app.schemas.batch_item import BatchItemStatus
 
 async def get_or_create_scenario(db: AsyncSession, project_id: int, scenario_due: date) -> Scenarios:
     # 1. 동일한 프로젝트 + 동일한 due를 가진 시나리오가 이미 있는지 확인
@@ -200,3 +204,239 @@ async def delete_scenario_cascade(db: AsyncSession, scenario_id: int):
     # 3. 최상위 시나리오 삭제
     await db.delete(scenario)
     await db.commit()
+
+
+async def get_scenario_history(
+    db: AsyncSession,
+    project_name: Optional[str] = None,
+    scenario_name: Optional[str] = None,
+    proj_due_min: Optional[date] = None,
+    proj_due_max: Optional[date] = None,
+    scen_due_min: Optional[date] = None,
+    scen_due_max: Optional[date] = None,
+    gen_date_min: Optional[date] = None,
+    gen_date_max: Optional[date] = None
+) -> list:
+    """GET: 시나리오 생성 이력 다중 필터링 및 통계 조회 (DRAFT 상태만)"""
+    
+    # 1. 기본 조인 쿼리 (Scenarios + Projects)
+    # 여기에 Scenarios.status == "DRAFT" 조건을 기본으로 추가합니다.
+    stmt = (
+        select(Scenarios, Projects)
+        .join(Projects, Scenarios.project_id == Projects.id)
+        .where(Scenarios.status == "DRAFT")  # <-- DRAFT 상태 필터링 추가
+    )
+    
+    # 2. 동적 필터링 적용 (이하 로직은 기존과 완전히 동일합니다)
+    if project_name:
+        stmt = stmt.where(Projects.title.ilike(f"%{project_name}%"))
+    if scenario_name:
+        stmt = stmt.where(Scenarios.title.ilike(f"%{scenario_name}%"))
+        
+    if proj_due_min:
+        stmt = stmt.where(Projects.project_due >= proj_due_min)
+    if proj_due_max:
+        stmt = stmt.where(Projects.project_due <= proj_due_max)
+        
+    if scen_due_min:
+        stmt = stmt.where(Scenarios.scenario_due >= scen_due_min)
+    if scen_due_max:
+        stmt = stmt.where(Scenarios.scenario_due <= scen_due_max)
+        
+    # gen_date는 datetime(created_at)이므로, max값은 해당 일자의 23:59:59까지 포함하도록 처리
+    if gen_date_min:
+        stmt = stmt.where(Scenarios.created_at >= datetime.combine(gen_date_min, datetime.min.time()))
+    if gen_date_max:
+        stmt = stmt.where(Scenarios.created_at <= datetime.combine(gen_date_max, datetime.max.time()))
+
+    result = await db.execute(stmt)
+    rows = result.all()
+
+    # 3. 프로젝트 기준으로 데이터 그룹화 및 통계 계산
+    projects_map = {}
+    
+    for scenario, project in rows:
+        if project.id not in projects_map:
+            projects_map[project.id] = {
+                "projectId": project.id,
+                "projectTitle": project.title,
+                "scenario": []
+            }
+            
+        # [통계 1] 총 예상 커팅 시간
+        cut_stmt = select(func.sum(LazerCutting.estimated_cutting_time)).where(LazerCutting.scenario_id == scenario.id)
+        total_minute = (await db.execute(cut_stmt)).scalar() or 0
+        
+        # [통계 2] 배치 아이템(피킹, 재배치) 개수 카운트
+        batch_stmt = select(BatchItems.batch_item_action).join(Batch, BatchItems.batch_id == Batch.id).where(Batch.scenario_id == scenario.id)
+        actions = (await db.execute(batch_stmt)).scalars().all()
+        
+        selected_wips = sum(1 for a in actions if a == BatchActionType.PICKING.value)
+        num_relocation = sum(1 for a in actions if a == BatchActionType.RELOCATE.value)
+        
+        # [통계 3] 크레인 이동 횟수 (임의 로직: 피킹 횟수 + 재배치 횟수 + 기본 이동값 등 조정 가능)
+        num_crane = selected_wips + num_relocation
+        
+        # 시나리오 데이터 조립
+        scenario_item = ScenarioHistoryItem(
+            id=scenario.id,
+            title=scenario.title,
+            due=scenario.scenario_due,
+            lazerName=scenario.lazer_name.value if scenario.lazer_name else "LAZER1",
+            selectedWips=selected_wips,
+            num_relocation=num_relocation, # Pydantic이 출력 시 "#relocation"으로 자동 치환
+            num_crane=num_crane,           # Pydantic이 출력 시 "#crane"으로 자동 치환
+            totalMinute=total_minute
+        )
+        
+        projects_map[project.id]["scenario"].append(scenario_item)
+
+    # 4. Dictionary의 값들만 추출해서 List 형태로 반환
+    return [ProjectScenarioHistory(**data) for data in projects_map.values()]
+
+
+# app/services/scenario_service.py 하단에 추가
+async def send_scenario_to_field(db: AsyncSession, scenario_id: int):
+    """
+    POST: 시나리오 현장 전송
+    1. 선택된 시나리오 상태 ORDERED 변경 및 ordered_at 기록
+    2. 연관된 BatchItems(PICKING) 상태 PENDING 변경
+    3. 연관된 SteelWip 상태 RESERVATED 변경
+    4. 동일한 title을 가졌지만 선택되지 않은 다른 DRAFT 시나리오 삭제
+    """
+    # 1. 대상 시나리오 조회 및 유효성 검사
+    scenario = await db.get(Scenarios, scenario_id)
+    if not scenario:
+        raise ValueError("전송할 시나리오를 찾을 수 없습니다.")
+        
+    if scenario.status != "DRAFT":
+        raise ValueError("대기(DRAFT) 상태인 시나리오만 전송할 수 있습니다.")
+
+    target_title = scenario.title
+    
+    # 2. 선택된 시나리오 상태 변경
+    scenario.status = "ORDERED"
+    scenario.ordered_at = datetime.now()
+    
+    # 3. Batch 조회
+    batch_stmt = select(Batch.id).where(Batch.scenario_id == scenario_id)
+    batches = (await db.execute(batch_stmt)).scalars().all()
+    
+    if batches:
+        # 4. BatchItems 상태 PENDING 변경 (PICKING인 것들만)
+        items_stmt = select(BatchItems).where(
+            BatchItems.batch_id.in_(batches),
+            BatchItems.batch_item_action == BatchActionType.PICKING.value
+        )
+        picking_items = (await db.execute(items_stmt)).scalars().all()
+        
+        wip_ids = []
+        for item in picking_items:
+            item.status = BatchItemStatus.PENDING.value
+            if item.steel_wip_id:
+                wip_ids.append(item.steel_wip_id)
+                
+        # 5. 연결된 SteelWip 상태 RESERVATED로 예약 변경
+        if wip_ids:
+            await db.execute(
+                update(SteelWip)
+                .where(SteelWip.id.in_(wip_ids))
+                .values(status="RESERVATED")
+            )
+            
+    # 6. 동일한 title을 가졌지만 선택받지 못한 다른 DRAFT 시나리오들 조회
+    other_scenarios_stmt = select(Scenarios.id).where(
+        Scenarios.title == target_title,
+        Scenarios.id != scenario_id,
+        Scenarios.status == "DRAFT"
+    )
+    other_scenario_ids = (await db.execute(other_scenarios_stmt)).scalars().all()
+    
+    # 7. 버려진 시나리오들 연쇄 삭제 (이전 삭제 로직 활용)
+    for other_id in other_scenario_ids:
+        # 이미 작성되어 있는 delete_scenario_cascade 함수를 재활용하여 하위 데이터까지 싹 지웁니다.
+        await delete_scenario_cascade(db, other_id)
+        
+    await db.commit()
+
+# app/services/scenario_service.py 하단에 추가
+
+async def get_sent_scenario_history(
+    db: AsyncSession,
+    project_name: Optional[str] = None,
+    proj_due_min: Optional[date] = None,
+    proj_due_max: Optional[date] = None,
+    scen_due_min: Optional[date] = None,
+    scen_due_max: Optional[date] = None,
+    send_date_min: Optional[date] = None,
+    send_date_max: Optional[date] = None
+) -> list:
+    """GET: 현장에 전송된 시나리오 이력 다중 필터링 및 통계 조회"""
+    
+    # 1. 기본 조인 쿼리 (Scenarios + Projects)
+    # DRAFT가 아닌(ORDERED, IN_PROGRESS, COMPLETED) 시나리오만 조회합니다.
+    stmt = (
+        select(Scenarios, Projects)
+        .join(Projects, Scenarios.project_id == Projects.id)
+        .where(Scenarios.status != "DRAFT")
+    )
+    
+    # 2. 동적 필터링 적용
+    if project_name:
+        stmt = stmt.where(Projects.title.ilike(f"%{project_name}%"))
+        
+    if proj_due_min:
+        stmt = stmt.where(Projects.project_due >= proj_due_min)
+    if proj_due_max:
+        stmt = stmt.where(Projects.project_due <= proj_due_max)
+        
+    if scen_due_min:
+        stmt = stmt.where(Scenarios.scenario_due >= scen_due_min)
+    if scen_due_max:
+        stmt = stmt.where(Scenarios.scenario_due <= scen_due_max)
+        
+    # send_date는 datetime(ordered_at) 기준입니다.
+    if send_date_min:
+        stmt = stmt.where(Scenarios.ordered_at >= datetime.combine(send_date_min, datetime.min.time()))
+    if send_date_max:
+        stmt = stmt.where(Scenarios.ordered_at <= datetime.combine(send_date_max, datetime.max.time()))
+
+    result = await db.execute(stmt)
+    rows = result.all()
+
+    # 3. 프로젝트 기준으로 데이터 그룹화 및 통계 계산
+    projects_map = {}
+    
+    for scenario, project in rows:
+        if project.id not in projects_map:
+            projects_map[project.id] = {
+                "projectId": project.id,
+                "projectTitle": project.title,
+                "projectDue": project.project_due,
+                "scenarios": []
+            }
+            
+        # [통계] 해당 시나리오에 포함된 PICKING 작업 개수 산출 (투입 WIPS 개수)
+        batch_stmt = (
+            select(func.count(BatchItems.id))
+            .join(Batch, BatchItems.batch_id == Batch.id)
+            .where(
+                Batch.scenario_id == scenario.id,
+                BatchItems.batch_item_action == BatchActionType.PICKING.value
+            )
+        )
+        num_input_wip = (await db.execute(batch_stmt)).scalar() or 0
+        
+        # 시나리오 데이터 조립
+        scenario_item = SentScenarioItem(
+            scenarioId=scenario.id,
+            scenarioTitle=scenario.title,
+            scenarioDue=scenario.scenario_due,
+            orderedAt=scenario.ordered_at or scenario.created_at, # 예외 방지용 fallback
+            numInputWip=num_input_wip
+        )
+        
+        projects_map[project.id]["scenarios"].append(scenario_item)
+
+    # 4. Dictionary를 List 객체 형태로 반환
+    return [SentProjectHistory(**data) for data in projects_map.values()]
