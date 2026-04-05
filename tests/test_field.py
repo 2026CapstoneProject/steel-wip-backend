@@ -333,33 +333,35 @@ async def test_end_batch_partially_completed_not_shown(client: AsyncClient, db_s
 # ══════════════════════════════════════════════════════════════════════
 # 통합 테스트 — capstoneDB-backup 실 dump 데이터 기반
 #
-# [dump 데이터 요약]
+# [dump 데이터 요약 — 2026-04-05 업데이트]
 #   scenarios
-#     id=1  scenario_order=0  status='ORDERED'  ← 현재 활성 시나리오
-#     id=2  scenario_order=0  status=NULL       ← NOT NULL 위반으로 로드 skip
-#     id=3  scenario_order=0  status='DRAFT'
+#     id=1  title='포스코 건설(80톤)-1'    scenario_order=1  status='ORDERED'  ← 현재 활성 (최소 order)
+#     id=2  title='토네이도 건설(12톤)-1'  scenario_order=2  status='ORDERED'  ← 대기 중
 #   batch
-#     id=1,2,3 → scenario_id=1
-#     id=4~9   → scenario_id=3
+#     id=1,2,3 → scenario_id=1 (배치 1: 30개 항목, 배치 2: 19개, 배치 3: 20개 → 총 69개)
+#     id=4,5,6 → scenario_id=2 (배치 4: 36개 항목, 배치 5: 30개, 배치 6: 15개 → 총 81개)
 #   batch_items
-#     모든 status = 'PENDING' 또는 'BEFORE_PENDING' (COMPLETED 없음)
-#     batch 1 아이템: id=1~32 (PICKING 4개, RELOCATE/INBOUND 28개)
+#     모든 status = 'PENDING' (COMPLETED 없음)
+#     batch 1 아이템: id=1~30
+#       - PICKING 4개: id=3(from=3:A-3,to=15:S4-1), id=7, id=18, id=28
+#       - RELOCATE/INBOUND: 나머지
 #   locations
 #     id=1  'A-1',  id=2  'A-2',  id=3  'A-3',  id=4  'A-4'
 #     id=5  'B-1',  id=6  'B-2',  id=7  'B-3'
 #     id=8  'C-1',  id=9  'C-2'
 #     id=15 'S4-1', id=16 'S4-2', id=17 'S4-3', id=18 'S4-4'
+#     id=23 'ETC'
 # ══════════════════════════════════════════════════════════════════════
 
 async def test_integration_end_no_completed_batches(
     client_with_dump: AsyncClient, db_with_dump: AsyncSession
 ):
     """
-    [통합] dump 실 데이터 기준 — 모든 batch_item이 PENDING/BEFORE_PENDING이므로
+    [통합] dump 실 데이터 기준 — 모든 batch_item이 PENDING이므로
     완료된 배치가 없어 batch 목록은 비어 있어야 한다.
     진행률도 0.0이어야 한다.
 
-    시나리오 1(ORDERED, scenario_order=0), 배치 1(batch_id=1) 사용.
+    시나리오 1(ORDERED, scenario_order=1 = 현재 활성), 배치 1(batch_id=1) 사용.
     """
     response = await client_with_dump.get("/api/field/end", params={"batchId": 1})
 
@@ -378,22 +380,23 @@ async def test_integration_end_scenario_meta(
 ):
     """
     [통합] dump 실 데이터 기준 — 시나리오 메타 정보(제목 등)가 올바르게 반환된다.
+    현재 활성 시나리오(scenario_order=1)의 제목 확인.
     """
     response = await client_with_dump.get("/api/field/end", params={"batchId": 1})
 
     assert response.status_code == 200
     data = response.json()["data"][0]
-    assert data["scenarioTitle"] == "POSCO 건설 (30톤)-1"
+    assert data["scenarioTitle"] == "포스코 건설(80톤)-1"
 
 
 async def test_integration_end_batch_from_other_scenario_rejected(
     client_with_dump: AsyncClient, db_with_dump: AsyncSession
 ):
     """
-    [통합] dump 실 데이터 기준 — 다른 시나리오(id=3)에 속하는 배치(id=4)를
-    전달하면 현재 시나리오(id=1)에 없으므로 빈 배열을 반환해야 한다.
+    [통합] dump 실 데이터 기준 — 다른 시나리오(id=2)에 속하는 배치(id=4)를
+    전달하면 현재 시나리오(id=1, scenario_order=1)에 없으므로 빈 배열을 반환해야 한다.
     """
-    # batch_id=4 는 scenario_id=3 소속 (시나리오 1과 다름)
+    # batch_id=4 는 scenario_id=2 소속 (현재 활성 시나리오 1과 다름)
     response = await client_with_dump.get("/api/field/end", params={"batchId": 4})
 
     assert response.status_code == 200
@@ -407,8 +410,8 @@ async def test_integration_end_completed_after_update(
     [통합] dump 실 데이터 기준 — 배치 1의 아이템을 모두 COMPLETED로 직접 업데이트 후
     호출하면 배치 1이 결과에 포함되고, 진행률이 0보다 커야 한다.
 
-    배치 1 아이템: id=1~32 (총 32개)
-    그 중 PICKING: id=1, 13, 22, 30  (from_location 각각 23, 6, 8, 1)
+    배치 1 아이템: id=1~30 (총 30개)
+    그 중 PICKING: id=3, 7, 18, 28 (4개)
     """
     # 배치 1의 모든 아이템을 COMPLETED로 업데이트 (실 DB 상태를 테스트 내에서 조작)
     await db_with_dump.execute(
@@ -424,10 +427,10 @@ async def test_integration_end_completed_after_update(
     # 배치 1이 완료 배치로 포함되어야 함
     assert len(data["batch"]) == 1
 
-    # 진행률: 배치1(32개) COMPLETED / 전체(배치1+2+3) 아이템 수
-    # 배치 2: 아이템 id=33~70 (38개), 배치 3: id=71~97 (27개)
-    total_items = 32 + 38 + 27   # 97
-    completed_items = 32
+    # 진행률: 배치1(30개) COMPLETED / 시나리오1 전체(배치1+2+3) 아이템 수
+    # 배치 2: 아이템 19개, 배치 3: 아이템 20개
+    total_items = 30 + 19 + 20   # 69
+    completed_items = 30
     expected_rate = round(completed_items / total_items, 2)
     assert data["scenarioProgressRate"] == expected_rate
 
@@ -442,7 +445,7 @@ async def test_integration_end_location_names_resolved(
 ):
     """
     [통합] dump 실 데이터 기준 — location ID가 실제 loc_name으로 변환되는지 검증.
-    배치 1, 아이템 1 (PICKING): from_location=23('ETC'), to_location=15('S4-1')
+    배치 1, 아이템 3 (PICKING): from_location=3('A-3'), to_location=15('S4-1')
     """
     await db_with_dump.execute(
         text("UPDATE batch_items SET status='COMPLETED' WHERE batch_id=1")
@@ -452,7 +455,7 @@ async def test_integration_end_location_names_resolved(
     response = await client_with_dump.get("/api/field/end", params={"batchId": 1})
 
     picking_items = response.json()["data"][0]["batch"][0]["picking"]
-    # batch_item id=1: from_location=23(ETC), to_location=15(S4-1), steel_wip_id=14
-    item_1 = next(p for p in picking_items if p["batchItemId"] == 1)
-    assert item_1["fromLocationName"] == "ETC"
-    assert item_1["toLocationName"] == "S4-1"
+    # batch_item id=3 (PICKING): from_location=3(A-3), to_location=15(S4-1), steel_wip_id=42
+    item_3 = next(p for p in picking_items if p["batchItemId"] == 3)
+    assert item_3["fromLocationName"] == "A-3"
+    assert item_3["toLocationName"] == "S4-1"

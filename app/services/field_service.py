@@ -91,7 +91,7 @@ async def _is_batch_completed(db: AsyncSession, batch_id: int) -> bool:
 async def get_field_end(db: AsyncSession, batch_id: int) -> list:
     """
     작업 완료 화면
-    1. 현재 진행 중인 시나리오 (scenario_order==0)를 먼저 확인한다.
+    1. 현재 진행 중인 시나리오 (최소 scenario_order)를 먼저 확인한다.
     2. 전달받은 batch_id가 그 시나리오에 속하는지 검증한다.
     3. 시나리오 전체 진행률(완료 아이템 / 전체 아이템)을 계산한다.
     4. 해당 시나리오의 Batch 중 '완료된 Batch'(모든 아이템 COMPLETED)만 리턴한다.
@@ -99,11 +99,15 @@ async def get_field_end(db: AsyncSession, batch_id: int) -> list:
     * 명세서의 GET + Request Body 구조는 HTTP 표준에 맞지 않아
       Query Parameter(?batchId=...)로 대체한다.
 
-    * scenario_order==0 검증으로 현재 진행 중인 시나리오만 조회한다.
+    * 현재 시나리오는 최소 scenario_order를 가진 시나리오 (일반적으로 1).
     """
 
-    # 1. 현재 진행 중인 시나리오 (scenario_order == 0) 조회
-    scenario_stmt = select(Scenarios).where(Scenarios.scenario_order == 0)
+    # 1. 현재 진행 중인 시나리오 (최소 scenario_order) 조회
+    # scenario_order는 시나리오 큐의 순서 → 최소값이 "현재 활성" 시나리오
+    scenario_stmt = (
+        select(Scenarios)
+        .order_by(Scenarios.scenario_order.asc())
+    )
     scenario = (await db.execute(scenario_stmt)).scalars().first()
 
     if not scenario:
