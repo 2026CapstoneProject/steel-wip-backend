@@ -3,12 +3,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from sqlalchemy import select, func
 
-from app.models import Scenarios, Batch, BatchItems, SteelWip, Locations, QrCodes
+from app.models import Scenarios, Batch, BatchItems, SteelWip, Locations, QrCodes, LazerCutting, EstimatedWips
 from app.schemas.field import (
     RelocationBatchItem,
     PickingBatchItem,
     FieldBatchGroup,
     FieldEndData,
+    ProgressWipItem,
+    ProgressLazerCutting,
+    FieldProgressData,
 )
 
 from typing import List
@@ -247,3 +250,131 @@ async def get_live_field_data(db: AsyncSession, lazer_name: str) -> List[FieldBa
         ))
 
     return response_list
+
+
+# ─────────────────────────────────────────────
+# GET /api/field/progress  —  생산 중 화면
+# ─────────────────────────────────────────────
+
+def _fmt_dim(v: float | None) -> str:
+    """치수 숫자를 wipName 문자열용으로 변환. 정수면 소수점 제거."""
+    if v is None:
+        return "0"
+    return str(int(v)) if v == int(v) else str(v)
+
+
+async def get_field_progress(db: AsyncSession) -> list:
+    """
+    생산 중 화면
+    1. 현재 시나리오(최소 scenario_order)를 조회한다.
+    2. 해당 시나리오의 첫 번째 배치(최소 batch_order)를 조회한다.
+    3. 해당 배치의 lazer_cutting 목록을 조회한다.
+    4. 각 lazer_cutting에 연결된 estimated_wips를 조회하고,
+       qr_id를 통해 실제 steel_wip과 INBOUND batch_item 상태를 결합한다.
+    5. expectedTotalRunningTime = lazer_cutting.estimated_cutting_time 합산 (분)
+    """
+
+    # ── 1. 현재 시나리오 (최소 scenario_order) ──────────────────────────
+    scenario_stmt = select(Scenarios).order_by(Scenarios.scenario_order.asc())
+    scenario = (await db.execute(scenario_stmt)).scalars().first()
+    if not scenario:
+        return []
+
+    # ── 2. 첫 번째 배치 (최소 batch_order) ──────────────────────────────
+    batch_stmt = (
+        select(Batch)
+        .where(Batch.scenario_id == scenario.id)
+        .order_by(Batch.batch_order.asc())
+    )
+    batch = (await db.execute(batch_stmt)).scalars().first()
+    if not batch:
+        return []
+
+    # ── 3. 해당 배치의 lazer_cutting 목록 ───────────────────────────────
+    lc_stmt = (
+        select(LazerCutting)
+        .where(LazerCutting.batch_id == batch.id)
+        .order_by(LazerCutting.id)
+    )
+    lazer_cuttings = (await db.execute(lc_stmt)).scalars().all()
+    if not lazer_cuttings:
+        return []
+
+    # ── 4. 총 예상 소요 시간 (분) ────────────────────────────────────────
+    expected_total = sum(lc.estimated_cutting_time or 0 for lc in lazer_cuttings)
+
+    # ── 5. 각 lazer_cutting별 데이터 구성 ───────────────────────────────
+    lc_groups: list[ProgressLazerCutting] = []
+
+    for lc in lazer_cuttings:
+        # 투입 재공품 정보
+        input_wip = await db.get(SteelWip, lc.steel_wip_id) if lc.steel_wip_id else None
+        input_wip_id = input_wip.id if input_wip else 0
+        material = input_wip.material if input_wip else ""
+
+        # 해당 lazer_cutting의 estimated_wips 조회
+        ew_stmt = (
+            select(EstimatedWips)
+            .where(EstimatedWips.lazer_cutting_id == lc.id)
+        )
+        ew_list = (await db.execute(ew_stmt)).scalars().all()
+
+        wip_items: list[ProgressWipItem] = []
+
+        for ew in ew_list:
+            # qr_id → 실제 steel_wip 조회
+            wip_stmt = select(SteelWip).where(SteelWip.qr_id == ew.qr_id)
+            actual_wip = (await db.execute(wip_stmt)).scalars().first()
+            if not actual_wip:
+                continue
+
+            # 같은 배치의 INBOUND batch_item 조회 (적재 대상)
+            inbound_stmt = select(BatchItems).where(
+                BatchItems.batch_id == batch.id,
+                BatchItems.steel_wip_id == actual_wip.id,
+                BatchItems.batch_item_action == "INBOUND",
+            )
+            inbound_item = (await db.execute(inbound_stmt)).scalars().first()
+
+            # to_location 이름
+            to_loc = None
+            if inbound_item and inbound_item.to_location:
+                to_loc = await db.get(Locations, inbound_item.to_location)
+
+            # 상태 표시 변환
+            item_status = ""
+            if inbound_item:
+                if inbound_item.status == "COMPLETED":
+                    item_status = "적재 완료"
+                elif inbound_item.status == "IN_PROGRESS":
+                    item_status = "적재 대기"
+                else:
+                    # PENDING / BEFORE_PENDING: 아직 시작 전
+                    item_status = inbound_item.status
+
+            # wipName: "{두께}X{가로}X{세로}"
+            wip_name = (
+                f"{_fmt_dim(actual_wip.thickness)}"
+                f"X{_fmt_dim(actual_wip.width)}"
+                f"X{_fmt_dim(actual_wip.length)}"
+            )
+
+            wip_items.append(ProgressWipItem(
+                wipId=actual_wip.id,
+                wipStatus=actual_wip.status,
+                wipName=wip_name,
+                toLocation=to_loc.loc_name if to_loc else None,
+                status=item_status,
+            ))
+
+        lc_groups.append(ProgressLazerCutting(
+            lazerCuttingId=lc.id,
+            inputWipId=input_wip_id,
+            material=material,
+            wip=wip_items,
+        ))
+
+    return [FieldProgressData(
+        expectedTotalRunningTime=expected_total,
+        lazer_cutting=lc_groups,
+    )]
