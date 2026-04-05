@@ -52,13 +52,17 @@ async def make_wip(
     return wip
 
 
-async def make_scenario(db: AsyncSession, order: int = 0) -> Scenarios:
+async def make_scenario(
+    db: AsyncSession,
+    order: int = 0,
+    lazer_name: str = "LAZER1",
+) -> Scenarios:
     scenario = Scenarios(
         title="테스트 시나리오-1",
         status="ORDERED",
         scenario_due=date(2026, 3, 31),
         scenario_order=order,
-        lazer_name="LAZER1",
+        lazer_name=lazer_name,
         emergency_or_not=False,
         created_at=datetime.now(),   # server_default 우회
     )
@@ -1309,3 +1313,493 @@ async def test_integration_ready_location_resolved(
     item_33 = next(p for p in batch2_picking if p["batchItemId"] == 33)
     assert item_33["fromLocationName"] == "B-2"
     assert item_33["toLocationName"] == "S4-1"
+
+
+# ══════════════════════════════════════════════════════════════════════
+# QR 인식 화면 — 단위 테스트 (16개)
+#
+# [대상 엔드포인트]
+#   GET  /api/field/{batchItemId}/relocQr     (재배치 QR 화면)
+#   GET  /api/field/{batchItemId}/pickingQr   (피킹 QR 화면)
+#   GET  /api/field/{batchItemId}/inboundQr   (적재 QR 화면)
+#   POST /api/field/{batchItemId}/wipQR       (잔재 QR 스캔)
+#   POST /api/field/{batchItemId}/locQR       (위치 QR 스캔)
+#   POST /api/field/{batchItemId}             (저장 — 작업 완료 처리)
+# ══════════════════════════════════════════════════════════════════════
+
+
+# ─── GET 화면 조회 (5개) ──────────────────────────────────────────────
+
+async def test_reloc_qr_basic(client: AsyncClient, db_session: AsyncSession):
+    """
+    RELOCATE 배치 아이템 조회 시
+    wipId·material·thickness·width·height(=length)·from/to 위치가 정확히 반환된다.
+    """
+    loc1 = await make_location(db_session, "A-1")
+    loc2 = await make_location(db_session, "B-1")
+    wip = SteelWip(
+        status="IN_STOCK", material="SM355A", thickness=18.0,
+        width=2438.0, length=6096.0, weight=200.0,
+        manufacturer="POSCO", location_id=loc1.id, stack_level=1,
+    )
+    db_session.add(wip)
+    await db_session.flush()
+
+    scenario = await make_scenario(db_session, order=1, lazer_name="LAZER1")
+    batch = await make_batch(db_session, scenario.id, batch_order=1)
+    item = BatchItems(
+        batch_id=batch.id, steel_wip_id=wip.id,
+        batch_item_action="RELOCATE", status="PENDING", batch_item_order=1,
+        from_location=loc1.id, to_location=loc2.id,
+        expected_start_time=0, expected_running_time=10,
+    )
+    db_session.add(item)
+    await db_session.commit()
+
+    response = await client.get(f"/api/field/{item.id}/relocQr")
+
+    assert response.status_code == 200
+    d = response.json()["data"][0]
+    assert d["batchItemId"] == item.id
+    assert d["wipId"] == wip.id
+    assert d["material"] == "SM355A"
+    assert d["thickness"] == 18.0
+    assert d["width"] == 2438.0
+    assert d["height"] == 6096.0        # DB length → height
+    assert d["fromLocationName"] == "A-1"
+    assert d["toLocationName"] == "B-1"
+
+
+async def test_reloc_qr_scan_flags_false(client: AsyncClient, db_session: AsyncSession):
+    """
+    item_scanned_at / destination_scanned_at 가 null 이면
+    itemScan=false, destinationScan=false 로 반환된다.
+    """
+    loc1 = await make_location(db_session, "A-1")
+    loc2 = await make_location(db_session, "B-1")
+    wip = await make_wip(db_session, loc1.id)
+
+    scenario = await make_scenario(db_session, order=1)
+    batch = await make_batch(db_session, scenario.id, batch_order=1)
+    item = BatchItems(
+        batch_id=batch.id, steel_wip_id=wip.id,
+        batch_item_action="RELOCATE", status="PENDING", batch_item_order=1,
+        from_location=loc1.id, to_location=loc2.id,
+        expected_start_time=0, expected_running_time=5,
+        item_scanned_at=None, destination_scanned_at=None,
+    )
+    db_session.add(item)
+    await db_session.commit()
+
+    response = await client.get(f"/api/field/{item.id}/relocQr")
+
+    d = response.json()["data"][0]
+    assert d["itemScan"] is False
+    assert d["destinationScan"] is False
+
+
+async def test_reloc_qr_scan_flags_true(client: AsyncClient, db_session: AsyncSession):
+    """
+    item_scanned_at / destination_scanned_at 가 설정되어 있으면
+    itemScan=true, destinationScan=true 로 반환된다.
+    """
+    from datetime import datetime as _dt, timezone as _tz
+    loc1 = await make_location(db_session, "A-1")
+    loc2 = await make_location(db_session, "B-1")
+    wip = await make_wip(db_session, loc1.id)
+
+    scenario = await make_scenario(db_session, order=1)
+    batch = await make_batch(db_session, scenario.id, batch_order=1)
+    now = _dt.now(_tz.utc)
+    item = BatchItems(
+        batch_id=batch.id, steel_wip_id=wip.id,
+        batch_item_action="RELOCATE", status="PENDING", batch_item_order=1,
+        from_location=loc1.id, to_location=loc2.id,
+        expected_start_time=0, expected_running_time=5,
+        item_scanned_at=now, destination_scanned_at=now,
+    )
+    db_session.add(item)
+    await db_session.commit()
+
+    response = await client.get(f"/api/field/{item.id}/relocQr")
+
+    d = response.json()["data"][0]
+    assert d["itemScan"] is True
+    assert d["destinationScan"] is True
+
+
+async def test_picking_qr_to_location_is_lazer_name(client: AsyncClient, db_session: AsyncSession):
+    """
+    PICKING: toLocationName = scenario.lazer_name (창고 위치가 아닌 레이저 기기명)
+    """
+    loc1 = await make_location(db_session, "A-1")
+    wip = await make_wip(db_session, loc1.id)
+
+    scenario = await make_scenario(db_session, order=1, lazer_name="LAZER2")
+    batch = await make_batch(db_session, scenario.id, batch_order=1)
+    item = BatchItems(
+        batch_id=batch.id, steel_wip_id=wip.id,
+        batch_item_action="PICKING", status="PENDING", batch_item_order=1,
+        from_location=loc1.id, to_location=None,  # PICKING: to_location=null
+        expected_start_time=0, expected_running_time=5,
+    )
+    db_session.add(item)
+    await db_session.commit()
+
+    response = await client.get(f"/api/field/{item.id}/pickingQr")
+
+    assert response.status_code == 200
+    d = response.json()["data"][0]
+    assert d["fromLocationName"] == "A-1"
+    assert d["toLocationName"] == "LAZER2"
+
+
+async def test_inbound_qr_from_location_is_lazer_name(client: AsyncClient, db_session: AsyncSession):
+    """
+    INBOUND: fromLocationName = scenario.lazer_name (창고 위치가 아닌 레이저 기기명)
+    """
+    loc2 = await make_location(db_session, "C-3")
+    wip = await make_wip(db_session, loc2.id)
+
+    scenario = await make_scenario(db_session, order=1, lazer_name="LAZER3")
+    batch = await make_batch(db_session, scenario.id, batch_order=1)
+    item = BatchItems(
+        batch_id=batch.id, steel_wip_id=wip.id,
+        batch_item_action="INBOUND", status="PENDING", batch_item_order=1,
+        from_location=None, to_location=loc2.id,  # INBOUND: from_location=null
+        expected_start_time=0, expected_running_time=5,
+    )
+    db_session.add(item)
+    await db_session.commit()
+
+    response = await client.get(f"/api/field/{item.id}/inboundQr")
+
+    assert response.status_code == 200
+    d = response.json()["data"][0]
+    assert d["fromLocationName"] == "LAZER3"
+    assert d["toLocationName"] == "C-3"
+
+
+# ─── POST wipQR (잔재 QR 스캔, 4개) ──────────────────────────────────
+
+async def test_wip_qr_scan_success(client: AsyncClient, db_session: AsyncSession):
+    """
+    올바른 잔재 QR 스캔 → 200, batch_item.item_scanned_at 업데이트.
+    """
+    loc1 = await make_location(db_session, "A-1")
+    loc2 = await make_location(db_session, "B-1")
+    qr = await make_qr_code(db_session, "QR-RELOC-001")
+    wip = SteelWip(
+        status="IN_STOCK", material="SM355A", thickness=20.0,
+        width=1000.0, length=2000.0, weight=50.0,
+        manufacturer="POSCO", location_id=loc1.id, stack_level=1, qr_id=qr.id,
+    )
+    db_session.add(wip)
+    await db_session.flush()
+
+    scenario = await make_scenario(db_session, order=1)
+    batch = await make_batch(db_session, scenario.id, batch_order=1)
+    item = BatchItems(
+        batch_id=batch.id, steel_wip_id=wip.id,
+        batch_item_action="RELOCATE", status="PENDING", batch_item_order=1,
+        from_location=loc1.id, to_location=loc2.id,
+        expected_start_time=0, expected_running_time=10,
+    )
+    db_session.add(item)
+    await db_session.commit()
+
+    response = await client.post(
+        f"/api/field/{item.id}/wipQR",
+        json={"wipQr": "QR-RELOC-001", "qrAction": "RELOCATION"},
+    )
+
+    assert response.status_code == 200
+    await db_session.refresh(item)
+    assert item.item_scanned_at is not None
+
+
+async def test_wip_qr_not_found_batch_item(client: AsyncClient, db_session: AsyncSession):
+    """존재하지 않는 batchItemId → 404"""
+    response = await client.post(
+        "/api/field/99999/wipQR",
+        json={"wipQr": "QR-XXX", "qrAction": "RELOCATION"},
+    )
+    assert response.status_code == 404
+
+
+async def test_wip_qr_not_found_qr_code(client: AsyncClient, db_session: AsyncSession):
+    """DB에 없는 QR 코드 스캔 → 400"""
+    loc1 = await make_location(db_session, "A-1")
+    loc2 = await make_location(db_session, "B-1")
+    wip = await make_wip(db_session, loc1.id)
+
+    scenario = await make_scenario(db_session, order=1)
+    batch = await make_batch(db_session, scenario.id, batch_order=1)
+    item = BatchItems(
+        batch_id=batch.id, steel_wip_id=wip.id,
+        batch_item_action="RELOCATE", status="PENDING", batch_item_order=1,
+        from_location=loc1.id, to_location=loc2.id,
+        expected_start_time=0, expected_running_time=5,
+    )
+    db_session.add(item)
+    await db_session.commit()
+
+    response = await client.post(
+        f"/api/field/{item.id}/wipQR",
+        json={"wipQr": "QR-NOT-EXIST", "qrAction": "RELOCATION"},
+    )
+    assert response.status_code == 400
+
+
+async def test_wip_qr_poka_yoke_fail(client: AsyncClient, db_session: AsyncSession):
+    """
+    Poka-Yoke: batchItem이 wip1을 대상으로 하는데 wip2의 QR을 스캔 → 400
+    """
+    loc1 = await make_location(db_session, "A-1")
+    loc2 = await make_location(db_session, "B-1")
+    qr1 = await make_qr_code(db_session, "QR-WIP1")
+    qr2 = await make_qr_code(db_session, "QR-WIP2")
+    wip1 = SteelWip(
+        status="IN_STOCK", material="SM355A", thickness=20.0,
+        width=1000.0, length=2000.0, weight=50.0,
+        manufacturer="POSCO", location_id=loc1.id, stack_level=1, qr_id=qr1.id,
+    )
+    wip2 = SteelWip(
+        status="IN_STOCK", material="SS275", thickness=15.0,
+        width=800.0, length=1500.0, weight=30.0,
+        manufacturer="HYUNDAI", location_id=loc2.id, stack_level=1, qr_id=qr2.id,
+    )
+    db_session.add_all([wip1, wip2])
+    await db_session.flush()
+
+    scenario = await make_scenario(db_session, order=1)
+    batch = await make_batch(db_session, scenario.id, batch_order=1)
+    item = BatchItems(
+        batch_id=batch.id, steel_wip_id=wip1.id,   # wip1 대상
+        batch_item_action="RELOCATE", status="PENDING", batch_item_order=1,
+        from_location=loc1.id, to_location=loc2.id,
+        expected_start_time=0, expected_running_time=5,
+    )
+    db_session.add(item)
+    await db_session.commit()
+
+    # wip2의 QR 스캔 → Poka-Yoke 실패
+    response = await client.post(
+        f"/api/field/{item.id}/wipQR",
+        json={"wipQr": "QR-WIP2", "qrAction": "RELOCATION"},
+    )
+    assert response.status_code == 400
+
+
+# ─── POST locQR (위치 QR 스캔, 4개) ──────────────────────────────────
+
+async def test_loc_qr_scan_success(client: AsyncClient, db_session: AsyncSession):
+    """
+    올바른 위치 QR 스캔 → 200, batch_item.destination_scanned_at 업데이트.
+    """
+    loc1 = await make_location(db_session, "A-1")
+    loc2 = await make_location(db_session, "B-2")
+    wip = await make_wip(db_session, loc1.id)
+
+    scenario = await make_scenario(db_session, order=1)
+    batch = await make_batch(db_session, scenario.id, batch_order=1)
+    item = BatchItems(
+        batch_id=batch.id, steel_wip_id=wip.id,
+        batch_item_action="RELOCATE", status="PENDING", batch_item_order=1,
+        from_location=loc1.id, to_location=loc2.id,
+        expected_start_time=0, expected_running_time=5,
+    )
+    db_session.add(item)
+    await db_session.commit()
+
+    response = await client.post(
+        f"/api/field/{item.id}/locQR",
+        json={"locQr": "B-2", "qrAction": "RELOCATION"},
+    )
+
+    assert response.status_code == 200
+    await db_session.refresh(item)
+    assert item.destination_scanned_at is not None
+
+
+async def test_loc_qr_not_found_batch_item(client: AsyncClient, db_session: AsyncSession):
+    """존재하지 않는 batchItemId → 404"""
+    response = await client.post(
+        "/api/field/99999/locQR",
+        json={"locQr": "A-1", "qrAction": "RELOCATION"},
+    )
+    assert response.status_code == 404
+
+
+async def test_loc_qr_not_found_location(client: AsyncClient, db_session: AsyncSession):
+    """DB에 없는 위치명 스캔 → 400"""
+    loc1 = await make_location(db_session, "A-1")
+    loc2 = await make_location(db_session, "B-1")
+    wip = await make_wip(db_session, loc1.id)
+
+    scenario = await make_scenario(db_session, order=1)
+    batch = await make_batch(db_session, scenario.id, batch_order=1)
+    item = BatchItems(
+        batch_id=batch.id, steel_wip_id=wip.id,
+        batch_item_action="RELOCATE", status="PENDING", batch_item_order=1,
+        from_location=loc1.id, to_location=loc2.id,
+        expected_start_time=0, expected_running_time=5,
+    )
+    db_session.add(item)
+    await db_session.commit()
+
+    response = await client.post(
+        f"/api/field/{item.id}/locQR",
+        json={"locQr": "Z-99", "qrAction": "RELOCATION"},
+    )
+    assert response.status_code == 400
+
+
+async def test_loc_qr_poka_yoke_fail(client: AsyncClient, db_session: AsyncSession):
+    """
+    Poka-Yoke: to_location=B-1 인데 C-1을 스캔 → 400
+    """
+    loc1 = await make_location(db_session, "A-1")
+    loc2 = await make_location(db_session, "B-1")
+    loc3 = await make_location(db_session, "C-1")
+    wip = await make_wip(db_session, loc1.id)
+
+    scenario = await make_scenario(db_session, order=1)
+    batch = await make_batch(db_session, scenario.id, batch_order=1)
+    item = BatchItems(
+        batch_id=batch.id, steel_wip_id=wip.id,
+        batch_item_action="RELOCATE", status="PENDING", batch_item_order=1,
+        from_location=loc1.id, to_location=loc2.id,   # 목표: B-1
+        expected_start_time=0, expected_running_time=5,
+    )
+    db_session.add(item)
+    await db_session.commit()
+
+    # C-1 스캔 → Poka-Yoke 실패
+    response = await client.post(
+        f"/api/field/{item.id}/locQR",
+        json={"locQr": "C-1", "qrAction": "RELOCATION"},
+    )
+    assert response.status_code == 400
+
+
+# ─── POST save (작업 완료 처리, 3개) ──────────────────────────────────
+
+async def test_save_relocation_success(client: AsyncClient, db_session: AsyncSession):
+    """
+    RELOCATION 저장:
+    - batch_item.status = COMPLETED
+    - steel_wip.location_id = to_location (이동 후 위치)
+    """
+    loc1 = await make_location(db_session, "A-1")
+    loc2 = await make_location(db_session, "B-1")
+    qr = await make_qr_code(db_session, "QR-SAVE-R")
+    wip = SteelWip(
+        status="IN_STOCK", material="SM355A", thickness=20.0,
+        width=1000.0, length=2000.0, weight=50.0,
+        manufacturer="POSCO", location_id=loc1.id, stack_level=1, qr_id=qr.id,
+    )
+    db_session.add(wip)
+    await db_session.flush()
+
+    scenario = await make_scenario(db_session, order=1)
+    batch = await make_batch(db_session, scenario.id, batch_order=1)
+    item = BatchItems(
+        batch_id=batch.id, steel_wip_id=wip.id,
+        batch_item_action="RELOCATE", status="PENDING", batch_item_order=1,
+        from_location=loc1.id, to_location=loc2.id,
+        expected_start_time=0, expected_running_time=10,
+    )
+    db_session.add(item)
+    await db_session.commit()
+
+    response = await client.post(
+        f"/api/field/{item.id}",
+        json={"action": "RELOCATION", "wipQR": "QR-SAVE-R", "locQR": "B-1"},
+    )
+
+    assert response.status_code == 200
+    await db_session.refresh(item)
+    await db_session.refresh(wip)
+    assert item.status == "COMPLETED"
+    assert wip.location_id == loc2.id
+
+
+async def test_save_inbound_success(client: AsyncClient, db_session: AsyncSession):
+    """
+    INBOUND 저장:
+    - batch_item.status = COMPLETED
+    - steel_wip.location_id = to_location
+    - steel_wip.status = "IN_STOCK"  (절단 후 창고 입고)
+    """
+    loc_to = await make_location(db_session, "C-5")
+    qr = await make_qr_code(db_session, "QR-SAVE-I")
+    wip = SteelWip(
+        status="REGISTERED", material="SM355A", thickness=10.0,
+        width=500.0, length=700.0, weight=10.0,
+        manufacturer="POSCO", location_id=None, stack_level=1, qr_id=qr.id,
+    )
+    db_session.add(wip)
+    await db_session.flush()
+
+    scenario = await make_scenario(db_session, order=1)
+    batch = await make_batch(db_session, scenario.id, batch_order=1)
+    item = BatchItems(
+        batch_id=batch.id, steel_wip_id=wip.id,
+        batch_item_action="INBOUND", status="PENDING", batch_item_order=1,
+        from_location=None, to_location=loc_to.id,
+        expected_start_time=0, expected_running_time=5,
+    )
+    db_session.add(item)
+    await db_session.commit()
+
+    response = await client.post(
+        f"/api/field/{item.id}",
+        json={"action": "INBOUND", "wipQR": "QR-SAVE-I", "locQR": "C-5"},
+    )
+
+    assert response.status_code == 200
+    await db_session.refresh(item)
+    await db_session.refresh(wip)
+    assert item.status == "COMPLETED"
+    assert wip.location_id == loc_to.id
+    assert wip.status == "IN_STOCK"
+
+
+async def test_save_picking_success(client: AsyncClient, db_session: AsyncSession):
+    """
+    PICKING 저장:
+    - batch_item.status = COMPLETED
+    - steel_wip.location_id = None  (레이저 투입 → 창고 위치 해제)
+    """
+    loc1 = await make_location(db_session, "A-1")
+    qr = await make_qr_code(db_session, "QR-SAVE-P")
+    wip = SteelWip(
+        status="IN_STOCK", material="SM355A", thickness=20.0,
+        width=1000.0, length=2000.0, weight=50.0,
+        manufacturer="POSCO", location_id=loc1.id, stack_level=1, qr_id=qr.id,
+    )
+    db_session.add(wip)
+    await db_session.flush()
+
+    scenario = await make_scenario(db_session, order=1)
+    batch = await make_batch(db_session, scenario.id, batch_order=1)
+    item = BatchItems(
+        batch_id=batch.id, steel_wip_id=wip.id,
+        batch_item_action="PICKING", status="PENDING", batch_item_order=1,
+        from_location=loc1.id, to_location=None,   # PICKING: to_location=null
+        expected_start_time=0, expected_running_time=5,
+    )
+    db_session.add(item)
+    await db_session.commit()
+
+    response = await client.post(
+        f"/api/field/{item.id}",
+        json={"action": "PICKING", "wipQR": "QR-SAVE-P", "locQR": "LAZER1"},
+    )
+
+    assert response.status_code == 200
+    await db_session.refresh(item)
+    await db_session.refresh(wip)
+    assert item.status == "COMPLETED"
+    assert wip.location_id is None
