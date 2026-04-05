@@ -1,5 +1,6 @@
 # app/schemas/field.py
-from pydantic import BaseModel
+
+from pydantic import BaseModel, Field
 from typing import List, Optional
 
 
@@ -50,3 +51,23 @@ class FieldEndData(BaseModel):
     scenarioTitle: str
     scenarioProgressRate: float   # 0.0 ~ 1.0 (완료 batch_item / 전체 batch_item)
     batch: List[FieldBatchGroup]  # 완료된 Batch만
+
+
+class FieldWipDetail(BaseModel):
+    qrId: str
+    material: str
+    manufacturer: str
+    thickness: str
+    width: str
+    length: str
+    weight: str
+
+class FieldBatchItem(BaseModel):
+    batchItemId: str
+    status: str
+    batchItemAction: str
+    wip: List[FieldWipDetail]
+    expectedStartTime: str
+    expectedRunningTime: str
+    fromLocationName: Optional[str]
+    toLocationName: Optional[str]

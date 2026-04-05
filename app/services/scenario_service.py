@@ -1,6 +1,6 @@
 # app/services/scenario_service.py 생성
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, or_ 
 from datetime import date, datetime, timedelta
 from typing import Optional
 
@@ -18,45 +18,66 @@ from app.schemas.enums import BatchActionType
 
 from app.schemas.scenario import ScenarioHistoryItem, ProjectScenarioHistory, SentScenarioItem, SentProjectHistory
 from app.schemas.batch_item import BatchItemStatus
+from app.schemas.wip import WipStatus
 
 async def get_or_create_scenario(db: AsyncSession, project_id: int, scenario_due: date) -> Scenarios:
-    # 1. 동일한 프로젝트 + 동일한 due를 가진 시나리오가 이미 있는지 확인
+    """
+    POST: 생산계획명 생성 로직 (수정됨)
+    - 동일한 프로젝트 + due를 가진 시나리오 중 status가 None인 것이 있다면 재사용
+    - 만약 status가 None이 아닌 것만 존재한다면, 가장 최근의 시나리오 title을 그대로 복사하여 
+      status=None 인 새로운 시나리오(비교군)를 생성
+    """
+    
+    # 1. 동일한 프로젝트 + 동일한 due를 가진 시나리오들을 최신순으로 모두 조회
     stmt_existing = select(Scenarios).where(
         Scenarios.project_id == project_id,
         Scenarios.scenario_due == scenario_due
-    )
-    result = await db.execute(stmt_existing)
-    existing_scenario = result.scalars().first()
+    ).order_by(Scenarios.id.desc())
     
-    # 이미 존재한다면 새로 만들지 않고 그대로 반환
-    if existing_scenario:
-        return existing_scenario
-        
-    # 2. 존재하지 않는다면, 해당 프로젝트의 이름을 조회
+    result = await db.execute(stmt_existing)
+    existing_scenarios = result.scalars().all()
+    
+    # 2. 조회된 시나리오 중 status가 None인 시나리오가 있는지 확인 (가장 최신 것 1개)
+    #    (None이면 아직 진행되지 않은 껍데기이므로 그대로 재사용)
+    for scenario in existing_scenarios:
+        if scenario.status is None:
+            return scenario
+            
+    # 3. 만약 모두 status가 None이 아니라면(이미 진행 중이라면)
+    #    혹은 아예 일치하는 시나리오가 없다면 새로 생성해야 함.
+    
     project = await db.get(Projects, project_id)
     if not project:
         raise ValueError("해당 프로젝트를 찾을 수 없습니다.")
         
-    # 3. 해당 프로젝트에 종속된 기존 시나리오가 몇 개 있는지(N) 세어서 N+1 생성
-    # title을 project_title-1, project_title-2 형식으로 맞추기 위함
-    stmt_count = select(func.count(Scenarios.id)).where(Scenarios.project_id == project_id)
-    count_result = await db.execute(stmt_count)
-    scenario_count = count_result.scalar() or 0
+    # 새 타이틀 결정 로직
+    new_title = ""
+    if existing_scenarios:
+        # 기존 시나리오가 있다면, 동일한 title(가장 최신 것 기준)을 그대로 복사
+        new_title = existing_scenarios[0].title
+    else:
+        # 아예 처음 만드는 due 라면 새로 넘버링(N+1)하여 title 생성
+        # (이 프로젝트에 속한 '고유한 title'의 개수를 세어 N+1을 붙임)
+        stmt_count = select(func.count(func.distinct(Scenarios.title))).where(
+            Scenarios.project_id == project_id
+        )
+        count_result = await db.execute(stmt_count)
+        unique_title_count = count_result.scalar() or 0
+        new_title = f"{project.title}-{unique_title_count + 1}"
     
-    new_title = f"{project.title}-{scenario_count + 1}"
-    
-    # 4. 새 시나리오 생성 (creator_id=1, assignee_id=2 하드코딩 반영)
+    # 4. 새 시나리오 생성 (비교군 또는 신규)
+    # status는 명시하지 않거나 None으로 두어 DB default(None)가 되도록 함.
     new_scenario = Scenarios(
         title=new_title,
         scenario_order=0,
-        status="DRAFT",
+        status=None,  # 수정됨: DRAFT 대신 None으로 초기화
         created_at=datetime.now(),
         scenario_due=scenario_due,
         lazer_name="LAZER1",
         emergency_or_not=False,
         project_id=project_id,
-        creator_id=1,   # 명세서 요청사항 반영
-        assignee_id=2   # 명세서 요청사항 반영
+        creator_id=1,   
+        assignee_id=2   
     )
     
     db.add(new_scenario)
@@ -141,42 +162,7 @@ async def get_scenario_result(db: AsyncSession, scenario_id: int) -> list:
     
     return [result_data]
 
-async def publish_scenario(db: AsyncSession, scenario_id: int):
-    """POST: 시나리오 발행 (상태값 변경 트랜잭션)"""
-    # 1. 시나리오 상태 변경 (DRAFT -> ORDERED)
-    scenario = await db.get(Scenarios, scenario_id)
-    if not scenario:
-        raise ValueError("시나리오를 찾을 수 없습니다.")
-    scenario.status = "ORDERED"
 
-    # 2. Batch 조회
-    batches = (await db.execute(select(Batch.id).where(Batch.scenario_id == scenario_id))).scalars().all()
-    if not batches:
-        await db.commit()
-        return
-
-    # 3. BatchItems (PICKING인 것들만) 상태 변경
-    items_stmt = select(BatchItems).where(
-        BatchItems.batch_id.in_(batches),
-        BatchItems.batch_item_action == BatchActionType.PICKING.value
-    )
-    picking_items = (await db.execute(items_stmt)).scalars().all()
-    wip_ids = []
-
-    for item in picking_items:
-        item.status = "PENDING"
-        if item.steel_wip_id:
-            wip_ids.append(item.steel_wip_id)
-
-    # 4. 연결된 SteelWip 상태 변경 (IN_STOCK -> RESERVATED)
-    if wip_ids:
-        await db.execute(
-            update(SteelWip)
-            .where(SteelWip.id.in_(wip_ids))
-            .values(status="RESERVATED")
-        )
-
-    await db.commit()
 
 async def delete_scenario_cascade(db: AsyncSession, scenario_id: int):
     """DELETE: 시나리오 및 종속된 모든 데이터 삭제"""
@@ -295,14 +281,18 @@ async def get_scenario_history(
     return [ProjectScenarioHistory(**data) for data in projects_map.values()]
 
 
-# app/services/scenario_service.py 하단에 추가
+# app/services/scenario_service.py 내 함수 교체
+from sqlalchemy import update, select
+from datetime import datetime
+
 async def send_scenario_to_field(db: AsyncSession, scenario_id: int):
     """
-    POST: 시나리오 현장 전송
-    1. 선택된 시나리오 상태 ORDERED 변경 및 ordered_at 기록
-    2. 연관된 BatchItems(PICKING) 상태 PENDING 변경
-    3. 연관된 SteelWip 상태 RESERVATED 변경
-    4. 동일한 title을 가졌지만 선택되지 않은 다른 DRAFT 시나리오 삭제
+    POST: 시나리오 현장 전송 (발행)
+    - 선택된 시나리오 상태 ORDERED 변경 및 ordered_at 기록
+    - [추가] 시나리오 순서(scenario_order) 할당 및 기존 순서 재배치
+    - 연관된 모든 BatchItems(재배치, 피킹, 적재) PENDING 변경
+    - PICKING 대상 SteelWip 상태 RESERVATED 변경
+    - 동일한 title을 가졌지만 선택되지 않은 다른 시나리오들 삭제
     """
     # 1. 대상 시나리오 조회 및 유효성 검사
     scenario = await db.get(Scenarios, scenario_id)
@@ -314,51 +304,153 @@ async def send_scenario_to_field(db: AsyncSession, scenario_id: int):
 
     target_title = scenario.title
     
-    # 2. 선택된 시나리오 상태 변경
+    # 2. 선택된 시나리오 상태 및 발행 시각 변경
     scenario.status = "ORDERED"
     scenario.ordered_at = datetime.now()
+    
+    # --- [추가] 3. 시나리오 순서(scenario_order) 로직 적용 ---
+    if scenario.emergency_or_not:
+        # 긴급 발주일 경우: 본인은 0순위
+        scenario.scenario_order = 0
+        
+        # 기존에 진행 중인(ORDERED, IN_PROGRESS) 시나리오들의 순서를 +1씩 밀어냄
+        push_stmt = (
+            update(Scenarios)
+            .where(
+                Scenarios.status.in_(["ORDERED", "IN_PROGRESS"]),
+                Scenarios.id != scenario_id # 자기 자신은 제외
+            )
+            .values(scenario_order=Scenarios.scenario_order + 1)
+        )
+        await db.execute(push_stmt)
+    else:
+        # 일반 발주일 경우: 현재 진행 중인 시나리오 중 MAX(순서) 조회
+        max_order_stmt = select(func.max(Scenarios.scenario_order)).where(
+            Scenarios.status.in_(["ORDERED", "IN_PROGRESS"])
+        )
+        max_order = (await db.execute(max_order_stmt)).scalar()
+        
+        # 없으면 0, 있으면 기존 최고순위 + 1
+        scenario.scenario_order = 0 if max_order is None else max_order + 1
+
+    db.add(scenario)
+    
+    # 4. Batch 조회
+    batch_stmt = select(Batch.id).where(Batch.scenario_id == scenario_id)
+    batches = (await db.execute(batch_stmt)).scalars().all()
+    
+    if batches:
+        # 5. BatchItems의 모든 작업(재배치, 피킹, 적재)을 가져옴
+        items_stmt = select(BatchItems).where(
+            BatchItems.batch_id.in_(batches)
+        )
+        all_items = (await db.execute(items_stmt)).scalars().all()
+        
+        wip_ids_for_reservation = []
+        for item in all_items:
+            # 모든 작업 지시를 PENDING(활성화) 상태로 변경
+            item.status = BatchItemStatus.PENDING.value
+            db.add(item)
+            
+            # 연관된 SteelWip 상태 변경(RESERVATED)은 PICKING 대상 자재에만 적용해야 함
+            if item.batch_item_action == BatchActionType.PICKING.value and item.steel_wip_id:
+                wip_ids_for_reservation.append(item.steel_wip_id)
+                
+        # 6. 연결된 원본 SteelWip 상태 RESERVATED로 예약 변경 (PICKING 대상만)
+        if wip_ids_for_reservation:
+            await db.execute(
+                update(SteelWip)
+                .where(SteelWip.id.in_(wip_ids_for_reservation))
+                .values(status=WipStatus.RESERVATED.value)
+            )
+            
+    # 7. 동일한 title을 가졌지만 선택받지 못한 다른 비교 시나리오들 조회 및 연쇄 삭제
+    other_scenarios_stmt = select(Scenarios.id).where(
+        Scenarios.title == target_title,
+        Scenarios.id != scenario_id,
+        or_(
+            Scenarios.status == "DRAFT",
+            Scenarios.status.is_(None) 
+        )
+    )
+    other_scenario_ids = (await db.execute(other_scenarios_stmt)).scalars().all()
+    
+    for other_id in other_scenario_ids:
+        await delete_scenario_cascade(db, other_id)
+        
+    # 8. 최종 반영
+    await db.commit()
+    """
+    POST: 시나리오 현장 전송 (발행)
+    1. 선택된 시나리오 상태 ORDERED 변경 및 ordered_at 기록
+    2. 연관된 BatchItems(PICKING) 상태 PENDING 변경
+    3. 연관된 SteelWip 상태 RESERVATED 변경
+    4. 동일한 title을 가졌지만 선택되지 않은 다른 시나리오들 삭제
+    """
+    # 1. 대상 시나리오 조회 및 유효성 검사
+    scenario = await db.get(Scenarios, scenario_id)
+    if not scenario:
+        raise ValueError("전송할 시나리오를 찾을 수 없습니다.")
+        
+    if scenario.status != "DRAFT":
+        raise ValueError("대기(DRAFT) 상태인 시나리오만 전송할 수 있습니다.")
+
+    # 삭제 대상을 찾기 위해 title 미리 저장
+    target_title = scenario.title
+    
+    # 2. 선택된 시나리오 상태 및 발행 시각 변경
+    scenario.status = "ORDERED"
+    scenario.ordered_at = datetime.now() # 확실하게 현재 시각 기록
+    db.add(scenario) # 세션에 명시적으로 추가 (세션 관리에 따라 누락될 수 있으므로 방어 코드)
     
     # 3. Batch 조회
     batch_stmt = select(Batch.id).where(Batch.scenario_id == scenario_id)
     batches = (await db.execute(batch_stmt)).scalars().all()
     
     if batches:
-        # 4. BatchItems 상태 PENDING 변경 (PICKING인 것들만)
+        # 4. BatchItems의 모든 작업(재배치, 피킹, 적재)을 가져옴
         items_stmt = select(BatchItems).where(
-            BatchItems.batch_id.in_(batches),
-            BatchItems.batch_item_action == BatchActionType.PICKING.value
+            BatchItems.batch_id.in_(batches)
         )
-        picking_items = (await db.execute(items_stmt)).scalars().all()
+        all_items = (await db.execute(items_stmt)).scalars().all()
         
-        wip_ids = []
-        for item in picking_items:
+        wip_ids_for_reservation = []
+        for item in all_items:
+            # 모든 작업 지시를 PENDING(활성화) 상태로 변경
             item.status = BatchItemStatus.PENDING.value
-            if item.steel_wip_id:
-                wip_ids.append(item.steel_wip_id)
+            db.add(item)
+            
+            # [조건 분기] 연관된 SteelWip 상태 변경(RESERVATED)은 PICKING 대상 자재에만 적용해야 함
+            if item.batch_item_action == BatchActionType.PICKING.value and item.steel_wip_id:
+                wip_ids_for_reservation.append(item.steel_wip_id)
                 
-        # 5. 연결된 SteelWip 상태 RESERVATED로 예약 변경
-        if wip_ids:
+        # 5. 연결된 원본 SteelWip 상태 RESERVATED로 예약 변경 (PICKING 대상만)
+        if wip_ids_for_reservation:
             await db.execute(
                 update(SteelWip)
-                .where(SteelWip.id.in_(wip_ids))
-                .values(status="RESERVATED")
+                .where(SteelWip.id.in_(wip_ids_for_reservation))
+                .values(status=WipStatus.RESERVATED.value)
             )
             
-    # 6. 동일한 title을 가졌지만 선택받지 못한 다른 DRAFT 시나리오들 조회
+    # 6. 동일한 title을 가졌지만 선택받지 못한 다른 시나리오들 조회
+    # (주의: status가 DRAFT인 것뿐만 아니라 앞선 2단계 로직에 의해 빈 껍데기(None)인 상태도 포함해야 합니다!)
     other_scenarios_stmt = select(Scenarios.id).where(
         Scenarios.title == target_title,
         Scenarios.id != scenario_id,
-        Scenarios.status == "DRAFT"
+        or_(
+            Scenarios.status == "DRAFT",
+            Scenarios.status.is_(None)  # is_(None)을 통해 확실한 IS NULL 쿼리 생성
+        )
     )
     other_scenario_ids = (await db.execute(other_scenarios_stmt)).scalars().all()
     
-    # 7. 버려진 시나리오들 연쇄 삭제 (이전 삭제 로직 활용)
+    # 7. 버려진 시나리오들 연쇄 삭제
     for other_id in other_scenario_ids:
-        # 이미 작성되어 있는 delete_scenario_cascade 함수를 재활용하여 하위 데이터까지 싹 지웁니다.
+        # 기존에 작성하신 delete_scenario_cascade 함수 호출
         await delete_scenario_cascade(db, other_id)
         
+    # 모든 변경사항(상태 업데이트, 시간 기록, 미선택 데이터 삭제)을 한 번에 Commit
     await db.commit()
-
 # app/services/scenario_service.py 하단에 추가
 
 async def get_sent_scenario_history(

@@ -49,6 +49,7 @@ app.include_router(scheduler.router, prefix="/api/scheduler", tags=["Scheduler"]
 app.include_router(scenario_cart.router, prefix="/api/scenario_cart", tags=["Scenario Cart"])
 app.include_router(scenario_send.router, prefix="/api/scenario_send", tags=["Scenario Send"])
 app.include_router(field.router, prefix="/api/field", tags=["Field"])
+app.include_router(field.router, prefix="/api/live_field", tags=["Field Dashboard"])
 
 @app.get("/")
 async def root():

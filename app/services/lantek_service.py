@@ -8,21 +8,24 @@ from app.models import Projects, Scenarios, LazerCutting, EstimatedWips, QrCodes
 from app.schemas.lantek import (
     LantekScenarioData, LantekCutting, LantekInput, LantekEstimatedWip
 )
+from app.schemas.enums import WipStatus
+
 
 async def create_dummy_lantek_data(db: AsyncSession, scenario_id: int):
     scenario = await db.get(Scenarios, scenario_id)
     if not scenario:
         raise ValueError("시나리오를 찾을 수 없습니다.")
         
+    # [추가됨] 시나리오 상태를 None에서 DRAFT로 변경 (이제 파일이 업로드되었으므로 껍데기가 채워짐)
     scenario.status = "DRAFT"
     
-    # 1. 원본 SteelWip 테이블에서 랜덤으로 철판을 가져오기 위해 조회
-    stmt = select(SteelWip).limit(50)
+    # 1. 원본 SteelWip 테이블에서 상태가 IN_STOCK인 철판만 랜덤으로 가져오기 위해 조회
+    stmt = select(SteelWip).where(SteelWip.status == WipStatus.IN_STOCK.value).limit(50)
     wip_result = await db.execute(stmt)
     real_wips = wip_result.scalars().all()
     
     if not real_wips:
-        raise ValueError("기초 데이터인 SteelWip이 존재하지 않습니다.")
+        raise ValueError("가용 가능한 재고(IN_STOCK)가 존재하지 않습니다.")
 
     # MAIN SOLVER 요구사항: 1 시나리오 당 총 12개의 커팅 (3배치 * 4커팅) 생성
     TOTAL_CUTTINGS = 12
@@ -30,6 +33,12 @@ async def create_dummy_lantek_data(db: AsyncSession, scenario_id: int):
     for _ in range(TOTAL_CUTTINGS):
         # 자를 원본 철판 무작위 선택
         target_wip = random.choice(real_wips)
+        
+        # [방어 로직 추가] 만약 선택된 철판이 IN_STOCK이 아니라면 (실제 파일 업로드 시나리오 대비)
+        if target_wip.status != WipStatus.IN_STOCK.value:
+            # 트랜잭션을 명시적으로 롤백하고 예외를 던짐
+            await db.rollback()
+            raise ValueError(f"WIP ID {target_wip.id}는 이미 할당된 재고입니다.")
         
         # 2. 커팅 지시(LazerCutting) 생성
         # 예상 커팅 시간은 15분 ~ 120분 사이 무작위 (Integer)
@@ -73,7 +82,6 @@ async def create_dummy_lantek_data(db: AsyncSession, scenario_id: int):
             db.add(dummy_wip)
             
     await db.commit()
-
 
 # app/services/lantek_service.py 파일 내부의 get_lantek_data 함수 교체
 
