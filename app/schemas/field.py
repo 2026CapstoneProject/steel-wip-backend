@@ -116,3 +116,53 @@ class FieldReadyData(BaseModel):
     batch: List[FieldBatchGroup]         # 전체 Batch 목록 (RELOCATE / PICKING 분리)
     nextScenarioId: Optional[int] = None
     nextScenarioTitle: Optional[str] = None
+
+
+# ─────────────────────────────────────────────
+# QR 인식 화면 — GET 응답
+# (GET /api/field/{batchItemId}/relocQr|pickingQr|inboundQr)
+# ─────────────────────────────────────────────
+
+class QrScanData(BaseModel):
+    """
+    QR 인식 화면 공통 응답 — 재배치/피킹/적재 3종 GET이 모두 이 스키마를 사용한다.
+
+    - itemScan        : batch_item.item_scanned_at is not None  (잔재 QR 스캔 여부)
+    - destinationScan : batch_item.destination_scanned_at is not None  (위치 QR 스캔 여부)
+    - height          : DB steel_wip.length 컬럼 (명세서 표기는 height)
+    - PICKING의 toLocationName  = scenario.lazer_name  (창고가 아닌 레이저 기기명)
+    - INBOUND의 fromLocationName = scenario.lazer_name
+    """
+    batchItemId: int
+    wipId: int
+    material: str
+    thickness: float
+    width: float
+    height: float                          # steel_wip.length
+    fromLocationName: Optional[str] = None
+    toLocationName: Optional[str] = None
+    itemScan: bool
+    destinationScan: bool
+
+
+# ─────────────────────────────────────────────
+# QR 인식 화면 — POST 요청 스키마
+# ─────────────────────────────────────────────
+
+class WipQrRequest(BaseModel):
+    """잔재 QR 스캔 요청 (POST /{batchItemId}/wipQR)"""
+    wipQr: str
+    qrAction: str   # "RELOCATION" | "INBOUND" | "PICKING"
+
+
+class LocQrRequest(BaseModel):
+    """위치 QR 스캔 요청 (POST /{batchItemId}/locQR)"""
+    locQr: str
+    qrAction: str   # "RELOCATION" | "INBOUND" | "PICKING"
+
+
+class QrSaveRequest(BaseModel):
+    """저장 버튼 요청 (POST /{batchItemId}) — 작업 완료 처리"""
+    action: str     # "RELOCATION" | "INBOUND" | "PICKING"
+    wipQR: str
+    locQR: str
