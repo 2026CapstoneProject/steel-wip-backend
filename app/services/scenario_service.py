@@ -288,6 +288,100 @@ from datetime import datetime
 async def send_scenario_to_field(db: AsyncSession, scenario_id: int):
     """
     POST: 시나리오 현장 전송 (발행)
+    - 선택된 시나리오 상태 ORDERED 변경 및 ordered_at 기록
+    - [추가] 시나리오 순서(scenario_order) 할당 및 기존 순서 재배치
+    - 연관된 모든 BatchItems(재배치, 피킹, 적재) PENDING 변경
+    - PICKING 대상 SteelWip 상태 RESERVATED 변경
+    - 동일한 title을 가졌지만 선택되지 않은 다른 시나리오들 삭제
+    """
+    # 1. 대상 시나리오 조회 및 유효성 검사
+    scenario = await db.get(Scenarios, scenario_id)
+    if not scenario:
+        raise ValueError("전송할 시나리오를 찾을 수 없습니다.")
+        
+    if scenario.status != "DRAFT":
+        raise ValueError("대기(DRAFT) 상태인 시나리오만 전송할 수 있습니다.")
+
+    target_title = scenario.title
+    
+    # 2. 선택된 시나리오 상태 및 발행 시각 변경
+    scenario.status = "ORDERED"
+    scenario.ordered_at = datetime.now()
+    
+    # --- [추가] 3. 시나리오 순서(scenario_order) 로직 적용 ---
+    if scenario.emergency_or_not:
+        # 긴급 발주일 경우: 본인은 0순위
+        scenario.scenario_order = 0
+        
+        # 기존에 진행 중인(ORDERED, IN_PROGRESS) 시나리오들의 순서를 +1씩 밀어냄
+        push_stmt = (
+            update(Scenarios)
+            .where(
+                Scenarios.status.in_(["ORDERED", "IN_PROGRESS"]),
+                Scenarios.id != scenario_id # 자기 자신은 제외
+            )
+            .values(scenario_order=Scenarios.scenario_order + 1)
+        )
+        await db.execute(push_stmt)
+    else:
+        # 일반 발주일 경우: 현재 진행 중인 시나리오 중 MAX(순서) 조회
+        max_order_stmt = select(func.max(Scenarios.scenario_order)).where(
+            Scenarios.status.in_(["ORDERED", "IN_PROGRESS"])
+        )
+        max_order = (await db.execute(max_order_stmt)).scalar()
+        
+        # 없으면 0, 있으면 기존 최고순위 + 1
+        scenario.scenario_order = 0 if max_order is None else max_order + 1
+
+    db.add(scenario)
+    
+    # 4. Batch 조회
+    batch_stmt = select(Batch.id).where(Batch.scenario_id == scenario_id)
+    batches = (await db.execute(batch_stmt)).scalars().all()
+    
+    if batches:
+        # 5. BatchItems의 모든 작업(재배치, 피킹, 적재)을 가져옴
+        items_stmt = select(BatchItems).where(
+            BatchItems.batch_id.in_(batches)
+        )
+        all_items = (await db.execute(items_stmt)).scalars().all()
+        
+        wip_ids_for_reservation = []
+        for item in all_items:
+            # 모든 작업 지시를 PENDING(활성화) 상태로 변경
+            item.status = BatchItemStatus.PENDING.value
+            db.add(item)
+            
+            # 연관된 SteelWip 상태 변경(RESERVATED)은 PICKING 대상 자재에만 적용해야 함
+            if item.batch_item_action == BatchActionType.PICKING.value and item.steel_wip_id:
+                wip_ids_for_reservation.append(item.steel_wip_id)
+                
+        # 6. 연결된 원본 SteelWip 상태 RESERVATED로 예약 변경 (PICKING 대상만)
+        if wip_ids_for_reservation:
+            await db.execute(
+                update(SteelWip)
+                .where(SteelWip.id.in_(wip_ids_for_reservation))
+                .values(status=WipStatus.RESERVATED.value)
+            )
+            
+    # 7. 동일한 title을 가졌지만 선택받지 못한 다른 비교 시나리오들 조회 및 연쇄 삭제
+    other_scenarios_stmt = select(Scenarios.id).where(
+        Scenarios.title == target_title,
+        Scenarios.id != scenario_id,
+        or_(
+            Scenarios.status == "DRAFT",
+            Scenarios.status.is_(None) 
+        )
+    )
+    other_scenario_ids = (await db.execute(other_scenarios_stmt)).scalars().all()
+    
+    for other_id in other_scenario_ids:
+        await delete_scenario_cascade(db, other_id)
+        
+    # 8. 최종 반영
+    await db.commit()
+    """
+    POST: 시나리오 현장 전송 (발행)
     1. 선택된 시나리오 상태 ORDERED 변경 및 ordered_at 기록
     2. 연관된 BatchItems(PICKING) 상태 PENDING 변경
     3. 연관된 SteelWip 상태 RESERVATED 변경
@@ -314,25 +408,27 @@ async def send_scenario_to_field(db: AsyncSession, scenario_id: int):
     batches = (await db.execute(batch_stmt)).scalars().all()
     
     if batches:
-        # 4. BatchItems 상태 PENDING 변경 (PICKING인 것들만)
+        # 4. BatchItems의 모든 작업(재배치, 피킹, 적재)을 가져옴
         items_stmt = select(BatchItems).where(
-            BatchItems.batch_id.in_(batches),
-            BatchItems.batch_item_action == BatchActionType.PICKING.value
+            BatchItems.batch_id.in_(batches)
         )
-        picking_items = (await db.execute(items_stmt)).scalars().all()
+        all_items = (await db.execute(items_stmt)).scalars().all()
         
-        wip_ids = []
-        for item in picking_items:
+        wip_ids_for_reservation = []
+        for item in all_items:
+            # 모든 작업 지시를 PENDING(활성화) 상태로 변경
             item.status = BatchItemStatus.PENDING.value
             db.add(item)
-            if item.steel_wip_id:
-                wip_ids.append(item.steel_wip_id)
+            
+            # [조건 분기] 연관된 SteelWip 상태 변경(RESERVATED)은 PICKING 대상 자재에만 적용해야 함
+            if item.batch_item_action == BatchActionType.PICKING.value and item.steel_wip_id:
+                wip_ids_for_reservation.append(item.steel_wip_id)
                 
-        # 5. 연결된 원본 SteelWip 상태 RESERVATED로 예약 변경
-        if wip_ids:
+        # 5. 연결된 원본 SteelWip 상태 RESERVATED로 예약 변경 (PICKING 대상만)
+        if wip_ids_for_reservation:
             await db.execute(
                 update(SteelWip)
-                .where(SteelWip.id.in_(wip_ids))
+                .where(SteelWip.id.in_(wip_ids_for_reservation))
                 .values(status=WipStatus.RESERVATED.value)
             )
             
