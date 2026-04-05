@@ -12,6 +12,7 @@ from app.schemas.field import (
     ProgressWipItem,
     ProgressLazerCutting,
     FieldProgressData,
+    FieldReadyData,
 )
 
 from typing import List
@@ -378,3 +379,94 @@ async def get_field_progress(db: AsyncSession) -> list:
         expectedTotalRunningTime=expected_total,
         lazer_cutting=lc_groups,
     )]
+
+
+# ─────────────────────────────────────────────
+# GET /api/field/ready  —  생산 준비 화면
+# ─────────────────────────────────────────────
+
+async def get_field_ready(db: AsyncSession) -> list:
+    """
+    생산 준비 화면
+    1. 현재 시나리오(최소 scenario_order)와 다음 시나리오(두 번째로 작은 scenario_order)를 조회한다.
+    2. 현재 시나리오의 모든 Batch를 batch_order 순으로 순회하며 아래 규칙을 적용한다.
+       - 이미 완료된 Batch(모든 아이템 COMPLETED) → 제외
+       - 완료되지 않은 Batch 중 첫 번째(생산 중 화면 담당) → 제외
+       - 나머지 미완료 Batch들만 생산 준비 대상으로 포함
+    3. 각 Batch의 RELOCATE / PICKING 아이템을 분리해 FieldBatchGroup으로 변환한다.
+       INBOUND(적재) 아이템은 제외한다. (기존 _build_batch_group 헬퍼 재사용)
+    4. 진행률(scenarioProgressRate) = 현재 시나리오 전체 batch_item 중 COMPLETED 비율
+       (생산 중 배치 포함 전체 시나리오 기준)
+    5. 다음 시나리오가 없으면 nextScenarioId / nextScenarioTitle 은 None으로 반환한다.
+    """
+
+    # ── 1. 현재 시나리오 (최소 scenario_order) ──────────────────────────
+    scenario_stmt = select(Scenarios).order_by(Scenarios.scenario_order.asc())
+    scenario = (await db.execute(scenario_stmt)).scalars().first()
+    if not scenario:
+        return []
+
+    # ── 2. 다음 시나리오 (두 번째로 작은 scenario_order) ─────────────────
+    next_scenario_stmt = (
+        select(Scenarios)
+        .order_by(Scenarios.scenario_order.asc())
+        .offset(1)
+        .limit(1)
+    )
+    next_scenario = (await db.execute(next_scenario_stmt)).scalars().first()
+
+    # ── 3. 현재 시나리오의 모든 Batch ID 수집 ────────────────────────────
+    all_batch_ids_stmt = select(Batch.id).where(Batch.scenario_id == scenario.id)
+    all_batch_ids: list[int] = (await db.execute(all_batch_ids_stmt)).scalars().all()
+
+    # ── 4. 진행률 계산 ────────────────────────────────────────────────────
+    total_stmt = select(func.count(BatchItems.id)).where(
+        BatchItems.batch_id.in_(all_batch_ids)
+    )
+    total: int = (await db.execute(total_stmt)).scalar() or 0
+
+    completed_count_stmt = select(func.count(BatchItems.id)).where(
+        BatchItems.batch_id.in_(all_batch_ids),
+        BatchItems.status == "COMPLETED",
+    )
+    completed_count: int = (await db.execute(completed_count_stmt)).scalar() or 0
+
+    progress_rate = round(completed_count / total, 2) if total > 0 else 0.0
+
+    # ── 5. 생산 준비 대상 Batch 필터링 ──────────────────────────────────────
+    # batch_order 순으로 전체 배치를 순회하며:
+    #   - 완료된 배치(모든 아이템 COMPLETED)       → 건너뜀
+    #   - 미완료 배치 중 첫 번째(현재 생산 중)     → 건너뜀 (생산 중 화면 담당)
+    #   - 나머지 미완료 배치                       → 생산 준비 대상
+    all_batches_stmt = (
+        select(Batch)
+        .where(Batch.scenario_id == scenario.id)
+        .order_by(Batch.batch_order)
+    )
+    all_batches = (await db.execute(all_batches_stmt)).scalars().all()
+
+    in_progress_skipped = False   # 생산 중 배치를 한 번만 건너뜀
+    batch_groups: list[FieldBatchGroup] = []
+
+    for batch in all_batches:
+        # 완료된 배치 제외
+        if await _is_batch_completed(db, batch.id):
+            continue
+        # 미완료 배치 중 첫 번째 = 생산 중 화면 담당 → 건너뜀
+        if not in_progress_skipped:
+            in_progress_skipped = True
+            continue
+        # 나머지 미완료 배치 → FieldBatchGroup 변환
+        group = await _build_batch_group(db, batch)
+        batch_groups.append(group)
+
+    return [
+        FieldReadyData(
+            scenarioId=scenario.id,
+            scenarioTitle=scenario.title,
+            scenarioProgressRate=progress_rate,
+            batch=batch_groups,
+            nextScenarioId=next_scenario.id if next_scenario else None,
+            nextScenarioTitle=next_scenario.title if next_scenario else None,
+        )
+    ]

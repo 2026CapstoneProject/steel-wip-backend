@@ -98,3 +98,21 @@ class FieldProgressData(BaseModel):
     """생산 중 화면 응답 — 현재 배치의 절단 작업 전체"""
     expectedTotalRunningTime: int          # 모든 lazer_cutting.estimated_cutting_time 합산 (분)
     lazer_cutting: List[ProgressLazerCutting]
+
+
+# ─────────────────────────────────────────────
+# 생산 준비 화면 (GET /api/field/ready)
+# ─────────────────────────────────────────────
+
+class FieldReadyData(BaseModel):
+    """
+    생산 준비 화면 응답 데이터.
+    - 현재 시나리오의 모든 Batch(완료 여부 무관)를 포함한다.
+    - 다음 시나리오 정보(nextScenarioId, nextScenarioTitle)를 함께 반환한다.
+    """
+    scenarioId: int
+    scenarioTitle: str
+    scenarioProgressRate: float          # 0.0 ~ 1.0 (완료 batch_item / 전체 batch_item)
+    batch: List[FieldBatchGroup]         # 전체 Batch 목록 (RELOCATE / PICKING 분리)
+    nextScenarioId: Optional[int] = None
+    nextScenarioTitle: Optional[str] = None

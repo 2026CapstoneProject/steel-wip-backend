@@ -7,7 +7,7 @@ from typing import List
 
 from app.database import get_db
 from app.schemas import BaseResponse
-from app.schemas.field import FieldEndData, FieldBatchItem, FieldProgressData
+from app.schemas.field import FieldEndData, FieldBatchItem, FieldProgressData, FieldReadyData
 
 from app.services import field_service
 
@@ -64,10 +64,34 @@ async def get_field_progress(
 
 
 # ─────────────────────────────────────────────
+# GET /api/field/ready  —  생산 준비 화면
+# ─────────────────────────────────────────────
+# ⚠️ 주의: /{lazer_name} 캐치올 라우터보다 반드시 먼저 선언되어야 함
+@router.get("/ready", response_model=BaseResponse[List[FieldReadyData]])
+async def get_field_ready(
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    생산 준비 화면 조회
+
+    - 현재 시나리오(최소 scenario_order)의 전체 Batch 목록과 각 Batch의 작업(RELOCATE / PICKING)을 반환합니다.
+    - 완료 여부와 무관하게 모든 Batch를 포함합니다.
+    - scenarioProgressRate: 전체 batch_item 중 COMPLETED 비율
+    - nextScenarioId / nextScenarioTitle: 다음 시나리오 정보 (없으면 null)
+    """
+    data = await field_service.get_field_ready(db)
+    return BaseResponse(
+        status=200,
+        message="현장 생산 준비 정보 조회에 성공했습니다.",
+        data=data,
+    )
+
+
+# ─────────────────────────────────────────────
 # GET /api/field/{lazer_name}  —  실시간 현장 정보
 # ─────────────────────────────────────────────
 # ⚠️ 주의: 경로 파라미터 캐치올 라우터이므로 반드시 최하단에 위치해야 함
-# /end, /progress 등 정적 경로가 모두 이 위에 선언된 후 마지막에 위치
+# /end, /progress, /ready 등 정적 경로가 모두 이 위에 선언된 후 마지막에 위치
 @router.get("/{lazer_name}", response_model=BaseResponse[List[FieldBatchItem]])
 async def get_live_field_dashboard(
     lazer_name: str,
