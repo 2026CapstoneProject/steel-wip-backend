@@ -2,20 +2,16 @@
 
 from fastapi import APIRouter, Depends, Query
 
-
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List
 
 from app.database import get_db
 from app.schemas import BaseResponse
-from app.schemas.field import FieldEndData
-
-from app.schemas.field import FieldBatchItem, FieldEndData
+from app.schemas.field import FieldEndData, FieldBatchItem, FieldProgressData
 
 from app.services import field_service
 
 router = APIRouter()
-
 
 
 # ─────────────────────────────────────────────
@@ -42,7 +38,36 @@ async def get_field_end(
         data=data,
     )
 
-# 엔드포인트: /api/live_field/{lazer_name} (명세서 요구사항)
+
+# ─────────────────────────────────────────────
+# GET /api/field/progress  —  생산 중 화면
+# ─────────────────────────────────────────────
+# ⚠️ 주의: /{lazer_name} 캐치올 라우터보다 반드시 먼저 선언되어야 함
+@router.get("/progress", response_model=BaseResponse[List[FieldProgressData]])
+async def get_field_progress(
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    생산 중 화면 조회
+
+    - 현재 시나리오(최소 scenario_order)의 첫 번째 배치(최소 batch_order)를 기준으로,
+    - 해당 배치의 lazer_cutting 목록과 절단 후 발생할 예상 재공품(estimated_wips)을 반환합니다.
+    - 각 예상 재공품의 INBOUND 작업 상태("적재 대기" / "적재 완료")도 함께 반환합니다.
+    - expectedTotalRunningTime: 모든 lazer_cutting.estimated_cutting_time 합산 (분)
+    """
+    data = await field_service.get_field_progress(db)
+    return BaseResponse(
+        status=200,
+        message="현장 생산 중 정보 조회에 성공했습니다.",
+        data=data,
+    )
+
+
+# ─────────────────────────────────────────────
+# GET /api/field/{lazer_name}  —  실시간 현장 정보
+# ─────────────────────────────────────────────
+# ⚠️ 주의: 경로 파라미터 캐치올 라우터이므로 반드시 최하단에 위치해야 함
+# /end, /progress 등 정적 경로가 모두 이 위에 선언된 후 마지막에 위치
 @router.get("/{lazer_name}", response_model=BaseResponse[List[FieldBatchItem]])
 async def get_live_field_dashboard(
     lazer_name: str,
@@ -54,10 +79,9 @@ async def get_live_field_dashboard(
     - PENDING, IN_PROGRESS 상태인 작업 지시(BatchItem)만 시간순으로 필터링하여 반환합니다.
     """
     data = await field_service.get_live_field_data(db, lazer_name)
-    
+
     return BaseResponse(
         status=200,
         message="현장 실시간 정보 조회에 성공했습니다.",
         data=data
     )
-

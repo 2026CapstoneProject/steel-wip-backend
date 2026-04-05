@@ -1,6 +1,8 @@
 # tests/test_field.py
 """
-현장 담당자 API 테스트 — GET /api/field/end (작업 완료 화면)
+현장 담당자 API 테스트
+  - GET /api/field/end      (작업 완료 화면)
+  - GET /api/field/progress (생산 중 화면)
 
 [픽스처 규칙]
   - MySQL server_default(now() 등)는 SQLite에서 동작하지 않으므로
@@ -13,7 +15,7 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 
-from app.models import Locations, SteelWip, Scenarios, Batch, BatchItems
+from app.models import Locations, SteelWip, Scenarios, Batch, BatchItems, LazerCutting, EstimatedWips, QrCodes
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -459,3 +461,442 @@ async def test_integration_end_location_names_resolved(
     item_3 = next(p for p in picking_items if p["batchItemId"] == 3)
     assert item_3["fromLocationName"] == "A-3"
     assert item_3["toLocationName"] == "S4-1"
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 생산 중 화면 (GET /api/field/progress) — 헬퍼 함수
+# ══════════════════════════════════════════════════════════════════════
+
+async def make_qr_code(db: AsyncSession, qr_code: str = "QR-TEST") -> QrCodes:
+    qr = QrCodes(qr_code=qr_code)
+    db.add(qr)
+    await db.flush()
+    return qr
+
+
+async def make_lazer_cutting(
+    db: AsyncSession,
+    batch_id: int,
+    steel_wip_id: int | None = None,
+    ec_time: int = 10,
+) -> LazerCutting:
+    lc = LazerCutting(
+        batch_id=batch_id,
+        steel_wip_id=steel_wip_id,
+        estimated_cutting_time=ec_time,
+        status="PENDING",
+    )
+    db.add(lc)
+    await db.flush()
+    return lc
+
+
+async def make_estimated_wip(
+    db: AsyncSession,
+    lazer_cutting_id: int,
+    qr_id: int,
+    material: str = "SM355A",
+    thickness: float = 20.0,
+    width: float = 1000.0,
+    length: float = 2000.0,
+) -> EstimatedWips:
+    ew = EstimatedWips(
+        lazer_cutting_id=lazer_cutting_id,
+        qr_id=qr_id,
+        material=material,
+        thickness=thickness,
+        width=width,
+        length=length,
+    )
+    db.add(ew)
+    await db.flush()
+    return ew
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 생산 중 화면 — 단위 테스트
+# ══════════════════════════════════════════════════════════════════════
+
+async def test_progress_no_scenario(client: AsyncClient, db_session: AsyncSession):
+    """
+    시나리오가 없으면 data는 빈 배열이다.
+    """
+    response = await client.get("/api/field/progress")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == 200
+    assert body["message"] == "현장 생산 중 정보 조회에 성공했습니다."
+    assert body["data"] == []
+
+
+async def test_progress_no_batch(client: AsyncClient, db_session: AsyncSession):
+    """
+    시나리오는 있지만 배치가 없으면 빈 배열이다.
+    """
+    await make_scenario(db_session, order=1)
+    await db_session.commit()
+
+    response = await client.get("/api/field/progress")
+
+    assert response.status_code == 200
+    assert response.json()["data"] == []
+
+
+async def test_progress_no_lazer_cutting(client: AsyncClient, db_session: AsyncSession):
+    """
+    시나리오와 배치는 있지만 lazer_cutting이 없으면 빈 배열이다.
+    """
+    scenario = await make_scenario(db_session, order=1)
+    await make_batch(db_session, scenario.id, batch_order=1)
+    await db_session.commit()
+
+    response = await client.get("/api/field/progress")
+
+    assert response.status_code == 200
+    assert response.json()["data"] == []
+
+
+async def test_progress_returns_cutting_data(client: AsyncClient, db_session: AsyncSession):
+    """
+    lazer_cutting 1개에 estimated_wip 1개가 연결된 경우
+    expectedTotalRunningTime, lazer_cutting 배열, wip 목록이 정상 반환된다.
+    """
+    loc_from = await make_location(db_session, "A-1")
+    loc_to   = await make_location(db_session, "B-1")
+    input_wip = await make_wip(db_session, loc_from.id, material="SM355A")
+
+    # 예상 재공품을 위한 QR 코드 + SteelWip
+    qr = await make_qr_code(db_session, "QR-UNIT-1")
+    result_wip = SteelWip(
+        status="REGISTERED",
+        material="SM355A",
+        thickness=20.0,
+        width=1000.0,
+        length=2000.0,
+        weight=50.0,
+        manufacturer="POSCO",
+        location_id=None,
+        qr_id=qr.id,
+    )
+    db_session.add(result_wip)
+    await db_session.flush()
+
+    scenario = await make_scenario(db_session, order=1)
+    batch    = await make_batch(db_session, scenario.id, batch_order=1)
+    lc       = await make_lazer_cutting(db_session, batch.id, steel_wip_id=input_wip.id, ec_time=30)
+    await make_estimated_wip(db_session, lc.id, qr.id, thickness=20.0, width=1000.0, length=2000.0)
+
+    # INBOUND batch_item: 절단 후 result_wip를 loc_to에 적재
+    await make_batch_item(
+        db_session, batch.id, result_wip.id, None, loc_to.id,
+        action="INBOUND", status="PENDING",
+    )
+    await db_session.commit()
+
+    response = await client.get("/api/field/progress")
+
+    assert response.status_code == 200
+    data = response.json()["data"][0]
+
+    assert data["expectedTotalRunningTime"] == 30
+    assert len(data["lazer_cutting"]) == 1
+
+    lc_data = data["lazer_cutting"][0]
+    assert lc_data["inputWipId"] == input_wip.id
+    assert lc_data["material"] == "SM355A"
+    assert len(lc_data["wip"]) == 1
+
+    wip_item = lc_data["wip"][0]
+    assert wip_item["wipId"] == result_wip.id
+    assert wip_item["wipStatus"] == "REGISTERED"
+    assert wip_item["toLocation"] == "B-1"
+
+
+async def test_progress_wip_name_format(client: AsyncClient, db_session: AsyncSession):
+    """
+    wipName은 "{두께}X{가로}X{세로}" 형식이다.
+    - 정수는 소수점 없이 반환 (예: 20 → "20", 1000 → "1000")
+    - 소수가 있으면 그대로 반환 (예: 1446.4 → "1446.4")
+    """
+    loc = await make_location(db_session, "A-1")
+    loc_to = await make_location(db_session, "B-1")
+
+    qr = await make_qr_code(db_session, "QR-NAME-1")
+    # 두께=16(정수), 가로=1446.4(소수), 세로=1511(정수) → "16X1446.4X1511"
+    result_wip = SteelWip(
+        status="REGISTERED",
+        material="SM355A",
+        thickness=16.0,
+        width=1446.4,
+        length=1511.0,
+        weight=274.5,
+        manufacturer="POSCO",
+        location_id=None,
+        qr_id=qr.id,
+    )
+    db_session.add(result_wip)
+    await db_session.flush()
+
+    scenario = await make_scenario(db_session, order=1)
+    batch    = await make_batch(db_session, scenario.id, batch_order=1)
+    input_wip = await make_wip(db_session, loc.id)
+    lc = await make_lazer_cutting(db_session, batch.id, steel_wip_id=input_wip.id, ec_time=10)
+    await make_estimated_wip(db_session, lc.id, qr.id, thickness=16.0, width=1446.4, length=1511.0)
+    await make_batch_item(
+        db_session, batch.id, result_wip.id, None, loc_to.id,
+        action="INBOUND", status="PENDING",
+    )
+    await db_session.commit()
+
+    response = await client.get("/api/field/progress")
+
+    wip_item = response.json()["data"][0]["lazer_cutting"][0]["wip"][0]
+    assert wip_item["wipName"] == "16X1446.4X1511"
+
+
+async def test_progress_wip_status_mapping(client: AsyncClient, db_session: AsyncSession):
+    """
+    INBOUND batch_item 상태에 따른 status 문자열 변환 검증.
+      COMPLETED  → "적재 완료"
+      IN_PROGRESS → "적재 대기"
+      PENDING     → "PENDING" (원본 그대로)
+    """
+    loc = await make_location(db_session, "A-1")
+    loc_to1 = await make_location(db_session, "B-1")
+    loc_to2 = await make_location(db_session, "B-2")
+    loc_to3 = await make_location(db_session, "B-3")
+
+    qr1 = await make_qr_code(db_session, "QR-S1")
+    qr2 = await make_qr_code(db_session, "QR-S2")
+    qr3 = await make_qr_code(db_session, "QR-S3")
+
+    def new_wip(qr_id, loc_id):
+        return SteelWip(
+            status="REGISTERED", material="SM355A",
+            thickness=10.0, width=500.0, length=1000.0,
+            weight=10.0, manufacturer="POSCO",
+            location_id=loc_id, qr_id=qr_id,
+        )
+
+    wip1 = new_wip(qr1.id, None)
+    wip2 = new_wip(qr2.id, None)
+    wip3 = new_wip(qr3.id, None)
+    db_session.add_all([wip1, wip2, wip3])
+    await db_session.flush()
+
+    scenario  = await make_scenario(db_session, order=1)
+    batch     = await make_batch(db_session, scenario.id, batch_order=1)
+    input_wip = await make_wip(db_session, loc.id)
+    lc = await make_lazer_cutting(db_session, batch.id, steel_wip_id=input_wip.id, ec_time=5)
+
+    await make_estimated_wip(db_session, lc.id, qr1.id)
+    await make_estimated_wip(db_session, lc.id, qr2.id)
+    await make_estimated_wip(db_session, lc.id, qr3.id)
+
+    # INBOUND items — 상태 각각 다르게 설정
+    await make_batch_item(db_session, batch.id, wip1.id, None, loc_to1.id,
+                          action="INBOUND", status="COMPLETED")
+    await make_batch_item(db_session, batch.id, wip2.id, None, loc_to2.id,
+                          action="INBOUND", status="IN_PROGRESS")
+    await make_batch_item(db_session, batch.id, wip3.id, None, loc_to3.id,
+                          action="INBOUND", status="PENDING")
+    await db_session.commit()
+
+    response = await client.get("/api/field/progress")
+    wip_list = response.json()["data"][0]["lazer_cutting"][0]["wip"]
+
+    # wipId 기준으로 정렬해서 검증
+    wip_map = {w["wipId"]: w["status"] for w in wip_list}
+    assert wip_map[wip1.id] == "적재 완료"
+    assert wip_map[wip2.id] == "적재 대기"
+    assert wip_map[wip3.id] == "PENDING"
+
+
+async def test_progress_lazer_cutting_without_estimated_wips(
+    client: AsyncClient, db_session: AsyncSession
+):
+    """
+    lazer_cutting에 estimated_wip이 없는 경우 wip 배열이 비어 있다.
+    expectedTotalRunningTime은 정상적으로 합산된다.
+    """
+    loc = await make_location(db_session, "A-1")
+    input_wip = await make_wip(db_session, loc.id)
+
+    scenario = await make_scenario(db_session, order=1)
+    batch    = await make_batch(db_session, scenario.id, batch_order=1)
+    await make_lazer_cutting(db_session, batch.id, steel_wip_id=input_wip.id, ec_time=43)
+    await db_session.commit()
+
+    response = await client.get("/api/field/progress")
+
+    assert response.status_code == 200
+    data = response.json()["data"][0]
+    assert data["expectedTotalRunningTime"] == 43
+    assert len(data["lazer_cutting"]) == 1
+    assert data["lazer_cutting"][0]["wip"] == []
+
+
+async def test_progress_total_time_sum(client: AsyncClient, db_session: AsyncSession):
+    """
+    lazer_cutting 3개의 estimated_cutting_time이 올바르게 합산된다.
+    10 + 20 + 30 = 60분
+    """
+    loc = await make_location(db_session, "A-1")
+    wip1 = await make_wip(db_session, loc.id)
+    wip2 = await make_wip(db_session, loc.id)
+    wip3 = await make_wip(db_session, loc.id)
+
+    scenario = await make_scenario(db_session, order=1)
+    batch    = await make_batch(db_session, scenario.id, batch_order=1)
+    await make_lazer_cutting(db_session, batch.id, steel_wip_id=wip1.id, ec_time=10)
+    await make_lazer_cutting(db_session, batch.id, steel_wip_id=wip2.id, ec_time=20)
+    await make_lazer_cutting(db_session, batch.id, steel_wip_id=wip3.id, ec_time=30)
+    await db_session.commit()
+
+    response = await client.get("/api/field/progress")
+
+    assert response.status_code == 200
+    assert response.json()["data"][0]["expectedTotalRunningTime"] == 60
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 생산 중 화면 — 통합 테스트 (capstoneDB-backup 실 dump 데이터)
+#
+# [dump 데이터 요약 — 생산 중 화면 관련]
+#   현재 활성 시나리오: id=1 (scenario_order=1)
+#   현재 배치: id=1 (batch_order=1, scenario_id=1)
+#   lazer_cutting (batch_id=1):
+#     id=1  steel_wip_id=42  ec_time=23  → estimated_wips: qr_id=103(wip_id=103), qr_id=104(wip_id=104)
+#     id=2  steel_wip_id=1   ec_time=93  → estimated_wips: qr_id=105(wip_id=105), qr_id=106(wip_id=106)
+#     id=3  steel_wip_id=4   ec_time=32  → estimated_wips: qr_id=107(wip_id=107), qr_id=108(wip_id=108)
+#     id=4  steel_wip_id=39  ec_time=43  → estimated_wips: 없음
+#   예상 총 소요 시간: 23+93+32+43 = 191분
+#   INBOUND batch_items (batch_id=1):
+#     wip_id=103 → to_location=8(C-1),  status=PENDING
+#     wip_id=104 → to_location=1(A-1),  status=PENDING
+#     wip_id=105 → to_location=4(A-4),  status=PENDING
+#     wip_id=106 → to_location=7(B-3),  status=PENDING
+#     wip_id=107 → to_location=8(C-1),  status=PENDING
+#     wip_id=108 → to_location=3(A-3),  status=PENDING
+# ══════════════════════════════════════════════════════════════════════
+
+async def test_integration_progress_expected_total_time(
+    client_with_dump: AsyncClient, db_with_dump: AsyncSession
+):
+    """
+    [통합] dump 실 데이터 기준 — batch 1의 모든 lazer_cutting
+    estimated_cutting_time 합산이 191분이어야 한다.
+    (23 + 93 + 32 + 43 = 191)
+    """
+    response = await client_with_dump.get("/api/field/progress")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == 200
+    assert body["data"][0]["expectedTotalRunningTime"] == 191
+
+
+async def test_integration_progress_lazer_cutting_count(
+    client_with_dump: AsyncClient, db_with_dump: AsyncSession
+):
+    """
+    [통합] dump 실 데이터 기준 — batch 1의 lazer_cutting이 4개여야 한다.
+    """
+    response = await client_with_dump.get("/api/field/progress")
+
+    assert response.status_code == 200
+    data = response.json()["data"][0]
+    assert len(data["lazer_cutting"]) == 4
+
+
+async def test_integration_progress_estimated_wip_count(
+    client_with_dump: AsyncClient, db_with_dump: AsyncSession
+):
+    """
+    [통합] dump 실 데이터 기준 — estimated_wips 개수 검증.
+      lc_id=1: 2개, lc_id=2: 2개, lc_id=3: 2개, lc_id=4: 0개
+    """
+    response = await client_with_dump.get("/api/field/progress")
+
+    assert response.status_code == 200
+    lc_list = response.json()["data"][0]["lazer_cutting"]
+
+    # lazerCuttingId 기준으로 매핑
+    lc_map = {lc["lazerCuttingId"]: lc for lc in lc_list}
+    assert len(lc_map[1]["wip"]) == 2
+    assert len(lc_map[2]["wip"]) == 2
+    assert len(lc_map[3]["wip"]) == 2
+    assert len(lc_map[4]["wip"]) == 0
+
+
+async def test_integration_progress_wip_location_resolved(
+    client_with_dump: AsyncClient, db_with_dump: AsyncSession
+):
+    """
+    [통합] dump 실 데이터 기준 — INBOUND batch_item의 to_location이
+    실제 loc_name으로 변환되는지 검증.
+
+    lc_id=1의 첫 번째 예상 재공품(wip_id=103):
+      INBOUND batch_item → to_location=8 → 'C-1'
+    """
+    response = await client_with_dump.get("/api/field/progress")
+
+    assert response.status_code == 200
+    lc_list = response.json()["data"][0]["lazer_cutting"]
+
+    lc1 = next(lc for lc in lc_list if lc["lazerCuttingId"] == 1)
+    # wip_id=103의 toLocation이 'C-1'인지 확인
+    wip_103 = next(w for w in lc1["wip"] if w["wipId"] == 103)
+    assert wip_103["toLocation"] == "C-1"
+
+
+async def test_integration_progress_wip_name_format(
+    client_with_dump: AsyncClient, db_with_dump: AsyncSession
+):
+    """
+    [통합] dump 실 데이터 기준 — wipName 형식 검증.
+
+    wip_id=103: thickness=16, width=1446.4, length=1511
+    → "16X1446.4X1511"   (정수는 소수점 제거, 소수는 유지)
+    """
+    response = await client_with_dump.get("/api/field/progress")
+
+    lc_list = response.json()["data"][0]["lazer_cutting"]
+    lc1 = next(lc for lc in lc_list if lc["lazerCuttingId"] == 1)
+    wip_103 = next(w for w in lc1["wip"] if w["wipId"] == 103)
+
+    assert wip_103["wipName"] == "16X1446.4X1511"
+
+
+async def test_integration_progress_status_after_update(
+    client_with_dump: AsyncClient, db_with_dump: AsyncSession
+):
+    """
+    [통합] dump 실 데이터 기준 — INBOUND batch_item 상태를 직접 변경 후
+    status 문자열이 올바르게 변환되는지 검증.
+
+    wip_id=103 INBOUND(id=8):  PENDING → COMPLETED → "적재 완료"
+    wip_id=104 INBOUND(id=9):  PENDING → IN_PROGRESS → "적재 대기"
+    wip_id=107 INBOUND(id=26): PENDING 그대로 → "PENDING"
+    """
+    await db_with_dump.execute(
+        text("UPDATE batch_items SET status='COMPLETED' WHERE id=8")
+    )
+    await db_with_dump.execute(
+        text("UPDATE batch_items SET status='IN_PROGRESS' WHERE id=9")
+    )
+    await db_with_dump.commit()
+
+    response = await client_with_dump.get("/api/field/progress")
+
+    lc_list = response.json()["data"][0]["lazer_cutting"]
+    lc1 = next(lc for lc in lc_list if lc["lazerCuttingId"] == 1)
+
+    wip_map = {w["wipId"]: w["status"] for w in lc1["wip"]}
+    assert wip_map[103] == "적재 완료"
+    assert wip_map[104] == "적재 대기"
+
+    lc3 = next(lc for lc in lc_list if lc["lazerCuttingId"] == 3)
+    wip_map3 = {w["wipId"]: w["status"] for w in lc3["wip"]}
+    assert wip_map3[107] == "PENDING"

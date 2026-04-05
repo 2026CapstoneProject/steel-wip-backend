@@ -71,3 +71,30 @@ class FieldBatchItem(BaseModel):
     expectedRunningTime: str
     fromLocationName: Optional[str]
     toLocationName: Optional[str]
+
+
+# ─────────────────────────────────────────────
+# 생산 중 화면 (GET /api/field/progress)
+# ─────────────────────────────────────────────
+
+class ProgressWipItem(BaseModel):
+    """절단 후 발생하는 예상 재공품(estimated_wip) 1개"""
+    wipId: int                     # steel_wip.id (qr_id 연결)
+    wipStatus: str                 # steel_wip.status
+    wipName: str                   # "{두께}X{가로}X{세로}" 형식
+    toLocation: Optional[str] = None  # INBOUND batch_item의 to_location 이름
+    status: str                    # "적재 대기"(IN_PROGRESS) | "적재 완료"(COMPLETED)
+
+
+class ProgressLazerCutting(BaseModel):
+    """절단 작업 1건 — 투입 재공품 + 발생 예상 재공품 목록"""
+    lazerCuttingId: int
+    inputWipId: int    # lazer_cutting.steel_wip_id (원자재이면 0)
+    material: str      # 투입 재공품의 material
+    wip: List[ProgressWipItem]  # 절단 후 발생하는 재공품들
+
+
+class FieldProgressData(BaseModel):
+    """생산 중 화면 응답 — 현재 배치의 절단 작업 전체"""
+    expectedTotalRunningTime: int          # 모든 lazer_cutting.estimated_cutting_time 합산 (분)
+    lazer_cutting: List[ProgressLazerCutting]
