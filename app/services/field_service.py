@@ -1,7 +1,10 @@
 # app/services/field_service.py
-from sqlalchemy.ext.asyncio import AsyncSession
+from datetime import datetime, timezone
+from typing import List, Optional
 
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
+from fastapi import HTTPException
 
 from app.models import Scenarios, Batch, BatchItems, SteelWip, Locations, QrCodes, LazerCutting, EstimatedWips
 from app.schemas.field import (
@@ -13,9 +16,11 @@ from app.schemas.field import (
     ProgressLazerCutting,
     FieldProgressData,
     FieldReadyData,
+    QrScanData,
+    WipQrRequest,
+    LocQrRequest,
+    QrSaveRequest,
 )
-
-from typing import List
 from app.schemas.field import FieldBatchItem, FieldWipDetail
 from app.schemas.enums import BatchItemStatus
 
@@ -470,3 +475,188 @@ async def get_field_ready(db: AsyncSession) -> list:
             nextScenarioTitle=next_scenario.title if next_scenario else None,
         )
     ]
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# QR 인식 화면 — GET (relocQr / pickingQr / inboundQr)
+# ═══════════════════════════════════════════════════════════════════════
+
+async def _get_lazer_name_for_batch(db: AsyncSession, batch_id: int) -> Optional[str]:
+    """Batch ID → Scenario.lazer_name 조회 헬퍼 (PICKING/INBOUND 위치 표시용)"""
+    batch = await db.get(Batch, batch_id)
+    if not batch:
+        return None
+    scenario = await db.get(Scenarios, batch.scenario_id)
+    return scenario.lazer_name if scenario else None
+
+
+async def _get_qr_scan_data(
+    db: AsyncSession,
+    batch_item_id: int,
+    action_type: str,
+) -> Optional[QrScanData]:
+    """
+    GET QR 인식 화면 3종 공통 조회 헬퍼.
+
+    action_type 에 따라 from/to 위치 이름 결정 방식이 달라진다.
+      - RELOCATE : from = from_location.loc_name  /  to = to_location.loc_name
+      - PICKING  : from = from_location.loc_name  /  to = scenario.lazer_name
+      - INBOUND  : from = scenario.lazer_name     /  to = to_location.loc_name
+    """
+    item = await db.get(BatchItems, batch_item_id)
+    if not item:
+        return None
+
+    wip = await db.get(SteelWip, item.steel_wip_id) if item.steel_wip_id else None
+    lazer_name = await _get_lazer_name_for_batch(db, item.batch_id)
+
+    if action_type == "INBOUND":
+        from_loc_name: Optional[str] = lazer_name
+        to_loc = await db.get(Locations, item.to_location) if item.to_location else None
+        to_loc_name: Optional[str] = to_loc.loc_name if to_loc else None
+    elif action_type == "PICKING":
+        from_loc = await db.get(Locations, item.from_location) if item.from_location else None
+        from_loc_name = from_loc.loc_name if from_loc else None
+        to_loc_name = lazer_name
+    else:  # RELOCATE
+        from_loc = await db.get(Locations, item.from_location) if item.from_location else None
+        from_loc_name = from_loc.loc_name if from_loc else None
+        to_loc = await db.get(Locations, item.to_location) if item.to_location else None
+        to_loc_name = to_loc.loc_name if to_loc else None
+
+    return QrScanData(
+        batchItemId=item.id,
+        wipId=wip.id if wip else 0,
+        material=wip.material if wip else "",
+        thickness=wip.thickness if wip else 0.0,
+        width=wip.width if wip else 0.0,
+        height=wip.length if wip else 0.0,   # DB 컬럼명=length, 명세서 표기=height
+        fromLocationName=from_loc_name,
+        toLocationName=to_loc_name,
+        itemScan=item.item_scanned_at is not None,
+        destinationScan=item.destination_scanned_at is not None,
+    )
+
+
+async def get_reloc_qr(db: AsyncSession, batch_item_id: int) -> list:
+    """GET /api/field/{batchItemId}/relocQr — 재배치 QR 화면 조회"""
+    data = await _get_qr_scan_data(db, batch_item_id, "RELOCATE")
+    if data is None:
+        raise HTTPException(status_code=404, detail="배치 아이템을 찾을 수 없습니다.")
+    return [data]
+
+
+async def get_picking_qr(db: AsyncSession, batch_item_id: int) -> list:
+    """GET /api/field/{batchItemId}/pickingQr — 피킹 QR 화면 조회"""
+    data = await _get_qr_scan_data(db, batch_item_id, "PICKING")
+    if data is None:
+        raise HTTPException(status_code=404, detail="배치 아이템을 찾을 수 없습니다.")
+    return [data]
+
+
+async def get_inbound_qr(db: AsyncSession, batch_item_id: int) -> list:
+    """GET /api/field/{batchItemId}/inboundQr — 적재 QR 화면 조회"""
+    data = await _get_qr_scan_data(db, batch_item_id, "INBOUND")
+    if data is None:
+        raise HTTPException(status_code=404, detail="배치 아이템을 찾을 수 없습니다.")
+    return [data]
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# QR 인식 화면 — POST (wipQR / locQR / save)
+# ═══════════════════════════════════════════════════════════════════════
+
+async def scan_wip_qr(db: AsyncSession, batch_item_id: int, req: WipQrRequest) -> None:
+    """
+    POST /api/field/{batchItemId}/wipQR — 잔재 QR 스캔.
+
+    Poka-Yoke: 스캔된 QR 코드가 해당 batchItem의 steel_wip과 일치하는지 검증한다.
+    통과 시 batch_item.item_scanned_at을 현재 시각으로 기록한다.
+    """
+    item = await db.get(BatchItems, batch_item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="배치 아이템을 찾을 수 없습니다.")
+
+    qr_stmt = select(QrCodes).where(QrCodes.qr_code == req.wipQr)
+    qr = (await db.execute(qr_stmt)).scalars().first()
+    if not qr:
+        raise HTTPException(status_code=400, detail="등록되지 않은 QR 코드입니다.")
+
+    wip_stmt = select(SteelWip).where(SteelWip.qr_id == qr.id)
+    wip = (await db.execute(wip_stmt)).scalars().first()
+
+    if not wip or wip.id != item.steel_wip_id:
+        raise HTTPException(status_code=400, detail="스캔된 QR이 작업 대상 잔재와 일치하지 않습니다.")
+
+    item.item_scanned_at = datetime.now(timezone.utc)
+    await db.commit()
+
+
+async def scan_loc_qr(db: AsyncSession, batch_item_id: int, req: LocQrRequest) -> None:
+    """
+    POST /api/field/{batchItemId}/locQR — 위치 QR 스캔.
+
+    Poka-Yoke: 스캔된 위치명이 해당 batchItem의 to_location과 일치하는지 검증한다.
+    PICKING은 to_location=null(레이저 기기)이므로 위치 검증을 생략한다.
+    통과 시 batch_item.destination_scanned_at을 현재 시각으로 기록한다.
+    """
+    item = await db.get(BatchItems, batch_item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="배치 아이템을 찾을 수 없습니다.")
+
+    if req.qrAction != "PICKING":
+        loc_stmt = select(Locations).where(Locations.loc_name == req.locQr)
+        loc = (await db.execute(loc_stmt)).scalars().first()
+        if not loc:
+            raise HTTPException(status_code=400, detail="등록되지 않은 위치 QR입니다.")
+        if loc.id != item.to_location:
+            raise HTTPException(status_code=400, detail="스캔된 위치가 작업 목표 위치와 일치하지 않습니다.")
+
+    item.destination_scanned_at = datetime.now(timezone.utc)
+    await db.commit()
+
+
+async def save_qr_action(db: AsyncSession, batch_item_id: int, req: QrSaveRequest) -> None:
+    """
+    POST /api/field/{batchItemId} — 저장 버튼 클릭, 작업 완료 처리.
+
+    wipQR / locQR 재검증 후:
+      - batch_item.status = COMPLETED
+      - RELOCATION : steel_wip.location_id = to_location
+      - INBOUND    : steel_wip.location_id = to_location, steel_wip.status = IN_STOCK
+      - PICKING    : steel_wip.location_id = None (레이저 투입 → 창고 위치 해제)
+    """
+    item = await db.get(BatchItems, batch_item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="배치 아이템을 찾을 수 없습니다.")
+
+    # wipQR 재검증
+    qr_stmt = select(QrCodes).where(QrCodes.qr_code == req.wipQR)
+    qr = (await db.execute(qr_stmt)).scalars().first()
+    if not qr:
+        raise HTTPException(status_code=400, detail="등록되지 않은 잔재 QR 코드입니다.")
+
+    wip_stmt = select(SteelWip).where(SteelWip.qr_id == qr.id)
+    wip = (await db.execute(wip_stmt)).scalars().first()
+    if not wip or wip.id != item.steel_wip_id:
+        raise HTTPException(status_code=400, detail="스캔된 잔재 QR이 작업 대상과 일치하지 않습니다.")
+
+    # locQR 재검증 (PICKING은 목적지가 레이저 기기이므로 생략)
+    if req.action in ("RELOCATION", "INBOUND"):
+        loc_stmt = select(Locations).where(Locations.loc_name == req.locQR)
+        loc = (await db.execute(loc_stmt)).scalars().first()
+        if not loc or loc.id != item.to_location:
+            raise HTTPException(status_code=400, detail="스캔된 위치 QR이 작업 목표 위치와 일치하지 않습니다.")
+
+    # 완료 처리
+    item.status = "COMPLETED"
+
+    if req.action == "RELOCATION":
+        wip.location_id = item.to_location
+    elif req.action == "INBOUND":
+        wip.location_id = item.to_location
+        wip.status = "IN_STOCK"
+    elif req.action == "PICKING":
+        wip.location_id = None
+
+    await db.commit()
