@@ -3,6 +3,7 @@
 현장 담당자 API 테스트
   - GET /api/field/end      (작업 완료 화면)
   - GET /api/field/progress (생산 중 화면)
+  - GET /api/field/ready    (생산 준비 화면)
 
 [픽스처 규칙]
   - MySQL server_default(now() 등)는 SQLite에서 동작하지 않으므로
@@ -900,3 +901,411 @@ async def test_integration_progress_status_after_update(
     lc3 = next(lc for lc in lc_list if lc["lazerCuttingId"] == 3)
     wip_map3 = {w["wipId"]: w["status"] for w in lc3["wip"]}
     assert wip_map3[107] == "PENDING"
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 생산 준비 화면 (GET /api/field/ready) — 단위 테스트
+# ══════════════════════════════════════════════════════════════════════
+
+async def test_ready_no_scenario(client: AsyncClient, db_session: AsyncSession):
+    """
+    시나리오가 없으면 data는 빈 배열이다.
+    """
+    response = await client.get("/api/field/ready")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == 200
+    assert body["message"] == "현장 생산 준비 정보 조회에 성공했습니다."
+    assert body["data"] == []
+
+
+async def test_ready_no_batch(client: AsyncClient, db_session: AsyncSession):
+    """
+    시나리오는 있지만 배치가 없으면 batch 목록은 비어 있다.
+    scenarioProgressRate == 0.0이어야 한다.
+    """
+    scenario = await make_scenario(db_session, order=1)
+    await db_session.commit()
+
+    response = await client.get("/api/field/ready")
+
+    assert response.status_code == 200
+    data = response.json()["data"][0]
+    assert data["scenarioId"] == scenario.id
+    assert data["scenarioProgressRate"] == 0.0
+    assert data["batch"] == []
+
+
+async def test_ready_excludes_in_progress_batch(client: AsyncClient, db_session: AsyncSession):
+    """
+    생산 중인 첫 번째 배치(최소 batch_order)는 batch 목록에서 제외된다.
+    3개 배치 생성 → 첫 번째(생산 중)를 제외한 2개만 반환된다.
+    """
+    loc1 = await make_location(db_session, "A-1")
+    loc2 = await make_location(db_session, "B-1")
+    wip1 = await make_wip(db_session, loc1.id)
+    wip2 = await make_wip(db_session, loc2.id)
+    wip3 = await make_wip(db_session, loc1.id)
+
+    scenario = await make_scenario(db_session, order=1)
+    batch1 = await make_batch(db_session, scenario.id, batch_order=1)  # 생산 중 → 제외
+    batch2 = await make_batch(db_session, scenario.id, batch_order=2)  # 준비 대상
+    batch3 = await make_batch(db_session, scenario.id, batch_order=3)  # 준비 대상
+
+    await make_batch_item(db_session, batch1.id, wip1.id, loc1.id, loc2.id,
+                          action="PICKING", status="PENDING")
+    await make_batch_item(db_session, batch2.id, wip2.id, loc2.id, loc1.id,
+                          action="RELOCATE", status="PENDING")
+    await make_batch_item(db_session, batch3.id, wip3.id, loc1.id, loc2.id,
+                          action="PICKING", status="PENDING")
+    await db_session.commit()
+
+    response = await client.get("/api/field/ready")
+
+    assert response.status_code == 200
+    data = response.json()["data"][0]
+    # 첫 번째(생산 중) 배치 제외, 2개만 포함
+    assert len(data["batch"]) == 2
+
+
+async def test_ready_progress_rate(client: AsyncClient, db_session: AsyncSession):
+    """
+    scenarioProgressRate = COMPLETED 아이템 수 / 전체 아이템 수 (전체 시나리오 기준)
+
+    구성:
+      batch1 (완료) → 완료 배치로 제외
+      batch2 (생산 중) → 미완료 첫 번째로 제외
+      batch3 (준비 대상) → batch 목록에 포함
+
+    진행률: 1(batch1 완료) / 3(전체) = round(1/3, 2) = 0.33
+    배치 목록: [batch3] → 1개
+    """
+    loc1 = await make_location(db_session, "A-1")
+    loc2 = await make_location(db_session, "B-1")
+    wip1 = await make_wip(db_session, loc1.id)
+    wip2 = await make_wip(db_session, loc2.id)
+    wip3 = await make_wip(db_session, loc1.id)
+
+    scenario = await make_scenario(db_session, order=1)
+    batch1 = await make_batch(db_session, scenario.id, batch_order=1)  # 완료 → 제외
+    batch2 = await make_batch(db_session, scenario.id, batch_order=2)  # 생산 중 → 제외
+    batch3 = await make_batch(db_session, scenario.id, batch_order=3)  # 준비 대상
+
+    await make_batch_item(db_session, batch1.id, wip1.id, loc1.id, loc2.id,
+                          action="PICKING", status="COMPLETED")        # 완료
+    await make_batch_item(db_session, batch2.id, wip2.id, loc2.id, loc1.id,
+                          action="RELOCATE", status="PENDING")         # 생산 중
+    await make_batch_item(db_session, batch3.id, wip3.id, loc1.id, loc2.id,
+                          action="PICKING", status="PENDING")          # 준비
+    await db_session.commit()
+
+    response = await client.get("/api/field/ready")
+
+    data = response.json()["data"][0]
+    # batch 목록: batch3만 포함 (batch1 완료 제외, batch2 생산 중 제외)
+    assert len(data["batch"]) == 1
+    # 진행률: 전체 3개 아이템 중 1개 완료
+    assert data["scenarioProgressRate"] == round(1 / 3, 2)
+
+
+async def test_ready_relocation_and_picking_separated(client: AsyncClient, db_session: AsyncSession):
+    """
+    RELOCATE 아이템은 relocation 배열에, PICKING 아이템은 picking 배열에 분리된다.
+    INBOUND 아이템은 어느 배열에도 포함되지 않는다.
+    첫 번째 배치(생산 중)는 제외되므로 테스트 대상 아이템은 두 번째 배치에 넣는다.
+    """
+    loc1 = await make_location(db_session, "A-1")
+    loc2 = await make_location(db_session, "B-1")
+    loc3 = await make_location(db_session, "LAZER1")
+    wip_dummy = await make_wip(db_session, loc1.id)   # 생산 중 배치 더미
+    wip1 = await make_wip(db_session, loc1.id, material="SS275")
+    wip2 = await make_wip(db_session, loc2.id, material="SM355A")
+    wip3 = await make_wip(db_session, loc3.id, material="GS400")
+
+    scenario = await make_scenario(db_session, order=1)
+    batch1 = await make_batch(db_session, scenario.id, batch_order=1)  # 생산 중 → 제외
+    batch2 = await make_batch(db_session, scenario.id, batch_order=2)  # 테스트 대상
+
+    # batch1에 더미 아이템 (제외됨)
+    await make_batch_item(db_session, batch1.id, wip_dummy.id, loc1.id, loc2.id,
+                          action="PICKING", status="PENDING", item_order=1)
+    # batch2에 실제 검증 아이템
+    await make_batch_item(db_session, batch2.id, wip1.id, loc1.id, loc2.id,
+                          action="RELOCATE", status="PENDING", item_order=1)
+    await make_batch_item(db_session, batch2.id, wip2.id, loc2.id, loc3.id,
+                          action="PICKING", status="PENDING", item_order=2)
+    await make_batch_item(db_session, batch2.id, wip3.id, None, loc1.id,
+                          action="INBOUND", status="PENDING", item_order=3)
+    await db_session.commit()
+
+    response = await client.get("/api/field/ready")
+
+    assert response.status_code == 200
+    # batch 목록에는 batch2만 포함
+    assert len(response.json()["data"][0]["batch"]) == 1
+    batch_data = response.json()["data"][0]["batch"][0]
+
+    assert len(batch_data["relocation"]) == 1
+    assert batch_data["relocation"][0]["material"] == "SS275"
+    assert batch_data["relocation"][0]["fromLocationName"] == "A-1"
+    assert batch_data["relocation"][0]["toLocationName"] == "B-1"
+
+    assert len(batch_data["picking"]) == 1
+    assert batch_data["picking"][0]["material"] == "SM355A"
+    assert batch_data["picking"][0]["toLocationName"] == "LAZER1"
+
+    # INBOUND는 어느 배열에도 포함되지 않음
+    all_wip_ids = (
+        [r["wipId"] for r in batch_data["relocation"]]
+        + [p["wipId"] for p in batch_data["picking"]]
+    )
+    assert wip3.id not in all_wip_ids
+
+
+async def test_ready_next_scenario(client: AsyncClient, db_session: AsyncSession):
+    """
+    다음 시나리오(두 번째로 작은 scenario_order)의 id와 title이 반환된다.
+    """
+    await make_scenario(db_session, order=1)   # 현재
+    next_s = await make_scenario(db_session, order=2)  # 다음
+    # 다음 시나리오에도 제목을 확인하기 위해 title을 지정
+    next_s.title = "다음 시나리오-2"
+    await db_session.flush()
+    await db_session.commit()
+
+    response = await client.get("/api/field/ready")
+
+    data = response.json()["data"][0]
+    assert data["nextScenarioId"] == next_s.id
+    assert data["nextScenarioTitle"] == "다음 시나리오-2"
+
+
+async def test_ready_no_next_scenario(client: AsyncClient, db_session: AsyncSession):
+    """
+    현재 시나리오가 마지막(다음 시나리오 없음)이면
+    nextScenarioId와 nextScenarioTitle은 null이다.
+    """
+    await make_scenario(db_session, order=1)
+    await db_session.commit()
+
+    response = await client.get("/api/field/ready")
+
+    data = response.json()["data"][0]
+    assert data["nextScenarioId"] is None
+    assert data["nextScenarioTitle"] is None
+
+
+async def test_ready_picking_expected_running_time(client: AsyncClient, db_session: AsyncSession):
+    """
+    RELOCATE 아이템의 expectedRunningTime이 정확히 반환된다.
+    첫 번째 배치(생산 중)는 제외되므로 두 번째 배치에 아이템을 넣는다.
+    """
+    loc1 = await make_location(db_session, "A-1")
+    loc2 = await make_location(db_session, "B-1")
+    wip_dummy = await make_wip(db_session, loc1.id)
+    wip = await make_wip(db_session, loc1.id)
+
+    scenario = await make_scenario(db_session, order=1)
+    batch1 = await make_batch(db_session, scenario.id, batch_order=1)  # 생산 중 → 제외
+    batch2 = await make_batch(db_session, scenario.id, batch_order=2)  # 테스트 대상
+
+    # batch1 더미
+    await make_batch_item(db_session, batch1.id, wip_dummy.id, loc1.id, loc2.id,
+                          action="PICKING", status="PENDING")
+    # batch2 실제 검증 아이템
+    item = BatchItems(
+        batch_id=batch2.id,
+        steel_wip_id=wip.id,
+        batch_item_action="RELOCATE",
+        status="PENDING",
+        batch_item_order=1,
+        from_location=loc1.id,
+        to_location=loc2.id,
+        expected_start_time=0,
+        expected_running_time=15,   # 15분
+    )
+    db_session.add(item)
+    await db_session.commit()
+
+    response = await client.get("/api/field/ready")
+
+    reloc = response.json()["data"][0]["batch"][0]["relocation"][0]
+    assert reloc["expectedRunningTime"] == 15
+
+
+async def test_ready_excludes_completed_batch(client: AsyncClient, db_session: AsyncSession):
+    """
+    완료된 배치가 앞에 있어도 미완료 첫 번째 배치를 정확히 '생산 중'으로 식별한다.
+
+    구성:
+      batch1 (batch_order=1): COMPLETED  → 완료 배치로 제외
+      batch2 (batch_order=2): PENDING    → 미완료 첫 번째 → '생산 중'으로 제외
+      batch3 (batch_order=3): PENDING    → 생산 준비 대상 → 포함
+
+    검증:
+      - batch 목록에는 batch3만 포함된다 (len == 1)
+      - batch2가 '생산 중'으로 제외되었으므로 batch2 아이템(RELOCATE)은 relocation에 없다
+      - batch3 아이템(PICKING)은 picking에 포함된다
+    """
+    loc1 = await make_location(db_session, "A-1")
+    loc2 = await make_location(db_session, "B-1")
+    wip1 = await make_wip(db_session, loc1.id)
+    wip2 = await make_wip(db_session, loc2.id)
+    wip3 = await make_wip(db_session, loc1.id)
+
+    scenario = await make_scenario(db_session, order=1)
+    batch1 = await make_batch(db_session, scenario.id, batch_order=1)  # 완료 → 제외
+    batch2 = await make_batch(db_session, scenario.id, batch_order=2)  # 생산 중 → 제외
+    batch3 = await make_batch(db_session, scenario.id, batch_order=3)  # 준비 대상
+
+    await make_batch_item(db_session, batch1.id, wip1.id, loc1.id, loc2.id,
+                          action="RELOCATE", status="COMPLETED")        # 완료된 배치 아이템
+    await make_batch_item(db_session, batch2.id, wip2.id, loc2.id, loc1.id,
+                          action="RELOCATE", status="PENDING")          # 생산 중 배치 아이템
+    await make_batch_item(db_session, batch3.id, wip3.id, loc1.id, loc2.id,
+                          action="PICKING", status="PENDING")           # 준비 대상 배치 아이템
+    await db_session.commit()
+
+    response = await client.get("/api/field/ready")
+
+    assert response.status_code == 200
+    data = response.json()["data"][0]
+
+    # batch1(완료) 제외, batch2(생산 중) 제외 → batch3만 포함
+    assert len(data["batch"]) == 1
+
+    batch_group = data["batch"][0]
+
+    # batch3 아이템(PICKING)이 picking에 포함됨
+    assert len(batch_group["picking"]) == 1
+
+    # batch2 아이템(RELOCATE)은 포함되지 않음 — relocation 비어 있어야 함
+    assert len(batch_group["relocation"]) == 0
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 생산 준비 화면 — 통합 테스트 (capstoneDB-backup 실 dump 데이터)
+#
+# [dump 데이터 요약 — 생산 준비 화면 관련]
+#   현재 시나리오: id=1, title='포스코 건설(80톤)-1', scenario_order=1
+#   다음 시나리오: id=2, title='토네이도 건설(12톤)-1', scenario_order=2
+#   배치 (scenario_id=1):
+#     id=1 (batch_order=1): RELOCATE=20, PICKING=4, INBOUND=6  → 생산 중(제외)
+#     id=2 (batch_order=2): RELOCATE=10, PICKING=4, INBOUND=5  → 준비 대상 [0]
+#     id=3 (batch_order=3): RELOCATE=13, PICKING=4, INBOUND=3  → 준비 대상 [1]
+#   ready API 반환 배치 수: 2개 (id=2, id=3)
+#   전체 batch_item: 69개 (진행률 계산 시 배치 1 포함 전체 기준)
+#   초기 진행률: 0.0
+#   배치 2 PICKING id=33: from_loc=6(B-2), to_loc=15(S4-1)
+# ══════════════════════════════════════════════════════════════════════
+
+async def test_integration_ready_scenario_meta(
+    client_with_dump: AsyncClient, db_with_dump: AsyncSession
+):
+    """
+    [통합] dump 실 데이터 기준 — 현재 시나리오 메타 정보가 올바르게 반환된다.
+    """
+    response = await client_with_dump.get("/api/field/ready")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == 200
+
+    data = body["data"][0]
+    assert data["scenarioId"] == 1
+    assert data["scenarioTitle"] == "포스코 건설(80톤)-1"
+
+
+async def test_integration_ready_batch_count(
+    client_with_dump: AsyncClient, db_with_dump: AsyncSession
+):
+    """
+    [통합] dump 실 데이터 기준 — 생산 중인 첫 번째 배치(id=1)를 제외하면
+    준비 대상 배치는 2개(id=2, id=3)여야 한다.
+    """
+    response = await client_with_dump.get("/api/field/ready")
+
+    data = response.json()["data"][0]
+    assert len(data["batch"]) == 2
+
+
+async def test_integration_ready_initial_progress_rate(
+    client_with_dump: AsyncClient, db_with_dump: AsyncSession
+):
+    """
+    [통합] dump 실 데이터 기준 — 모든 batch_item이 PENDING이므로 진행률은 0.0이다.
+    """
+    response = await client_with_dump.get("/api/field/ready")
+
+    data = response.json()["data"][0]
+    assert data["scenarioProgressRate"] == 0.0
+
+
+async def test_integration_ready_next_scenario(
+    client_with_dump: AsyncClient, db_with_dump: AsyncSession
+):
+    """
+    [통합] dump 실 데이터 기준 — 다음 시나리오(id=2, '토네이도 건설(12톤)-1')가 반환된다.
+    """
+    response = await client_with_dump.get("/api/field/ready")
+
+    data = response.json()["data"][0]
+    assert data["nextScenarioId"] == 2
+    assert data["nextScenarioTitle"] == "토네이도 건설(12톤)-1"
+
+
+async def test_integration_ready_batch2_item_counts(
+    client_with_dump: AsyncClient, db_with_dump: AsyncSession
+):
+    """
+    [통합] dump 실 데이터 기준 — 생산 준비 첫 번째 대상인 배치 2(batch_order=2)의
+    RELOCATE(10)와 PICKING(4) 아이템 수 검증.
+    INBOUND(5)는 어느 배열에도 포함되지 않는다.
+    """
+    response = await client_with_dump.get("/api/field/ready")
+
+    batch_list = response.json()["data"][0]["batch"]
+    # batch[0] = batch_order=2 (배치 1은 생산 중으로 제외됨)
+    batch2 = batch_list[0]
+
+    assert len(batch2["relocation"]) == 10
+    assert len(batch2["picking"]) == 4
+
+
+async def test_integration_ready_progress_rate_after_update(
+    client_with_dump: AsyncClient, db_with_dump: AsyncSession
+):
+    """
+    [통합] dump 실 데이터 기준 — 배치 1 전체 아이템을 COMPLETED로 변경 후
+    scenarioProgressRate가 올바르게 갱신된다.
+
+    배치 1: 30개 완료 / 전체 69개 → round(30/69, 2) = 0.43
+    """
+    await db_with_dump.execute(
+        text("UPDATE batch_items SET status='COMPLETED' WHERE batch_id=1")
+    )
+    await db_with_dump.commit()
+
+    response = await client_with_dump.get("/api/field/ready")
+
+    data = response.json()["data"][0]
+    expected_rate = round(30 / 69, 2)
+    assert data["scenarioProgressRate"] == expected_rate
+
+
+async def test_integration_ready_location_resolved(
+    client_with_dump: AsyncClient, db_with_dump: AsyncSession
+):
+    """
+    [통합] dump 실 데이터 기준 — location ID가 loc_name으로 정상 변환되는지 검증.
+    배치 2(생산 준비 첫 번째), batch_item id=33 (PICKING):
+      from_location=6('B-2'), to_location=15('S4-1')
+    """
+    response = await client_with_dump.get("/api/field/ready")
+
+    # batch[0] = 배치 2 (배치 1은 생산 중으로 제외)
+    batch2_picking = response.json()["data"][0]["batch"][0]["picking"]
+    item_33 = next(p for p in batch2_picking if p["batchItemId"] == 33)
+    assert item_33["fromLocationName"] == "B-2"
+    assert item_33["toLocationName"] == "S4-1"
