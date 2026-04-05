@@ -77,7 +77,7 @@ class Locations(Base):
 class Projects(Base):
     __tablename__ = 'projects'
     __table_args__ = (
-        Index('title', 'title', unique=True),
+        Index('ix_projects_title', 'title', unique=True),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -116,9 +116,9 @@ class Scenarios(Base):
         ForeignKeyConstraint(['assignee_id'], ['users.id'], name='scenarios_ibfk_3'),
         ForeignKeyConstraint(['creator_id'], ['users.id'], name='scenarios_ibfk_2'),
         ForeignKeyConstraint(['project_id'], ['projects.id'], name='scenarios_ibfk_1'),
-        Index('assignee_id', 'assignee_id'),
-        Index('creator_id', 'creator_id'),
-        Index('project_id', 'project_id')
+        Index('ix_scenarios_assignee_id', 'assignee_id'),
+        Index('ix_scenarios_creator_id', 'creator_id'),
+        Index('ix_scenarios_project_id', 'project_id')
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -147,8 +147,8 @@ class SteelWip(Base):
     __table_args__ = (
         ForeignKeyConstraint(['location_id'], ['locations.id'], name='steel_wip_ibfk_1'),
         ForeignKeyConstraint(['qr_id'], ['qr_codes.id'], name='steel_wip_ibfk_2'),
-        Index('location_id', 'location_id'),
-        Index('qr_id', 'qr_id')
+        Index('ix_steel_wip_location_id', 'location_id'),
+        Index('ix_steel_wip_qr_id', 'qr_id')
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -174,7 +174,7 @@ class Batch(Base):
     __tablename__ = 'batch'
     __table_args__ = (
         ForeignKeyConstraint(['scenario_id'], ['scenarios.id'], name='batch_ibfk_1'),
-        Index('scenario_id', 'scenario_id')
+        Index('ix_batch_scenario_id', 'scenario_id')
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -192,8 +192,8 @@ class SteelWipHistory(Base):
     __table_args__ = (
         ForeignKeyConstraint(['history_location'], ['locations.id'], name='steel_wip_history_ibfk_2'),
         ForeignKeyConstraint(['steel_wip_id'], ['steel_wip.id'], name='steel_wip_history_ibfk_1'),
-        Index('history_location', 'history_location'),
-        Index('steel_wip_id', 'steel_wip_id')
+        Index('ix_steel_wip_history_history_location', 'history_location'),
+        Index('ix_steel_wip_history_steel_wip_id', 'steel_wip_id')
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -214,10 +214,10 @@ class BatchItems(Base):
         ForeignKeyConstraint(['from_location'], ['locations.id'], name='batch_items_ibfk_3'),
         ForeignKeyConstraint(['steel_wip_id'], ['steel_wip.id'], name='batch_items_ibfk_2'),
         ForeignKeyConstraint(['to_location'], ['locations.id'], name='batch_items_ibfk_4'),
-        Index('batch_id', 'batch_id'),
-        Index('from_location', 'from_location'),
-        Index('steel_wip_id', 'steel_wip_id'),
-        Index('to_location', 'to_location')
+        Index('ix_batch_items_batch_id', 'batch_id'),
+        Index('ix_batch_items_from_location', 'from_location'),
+        Index('ix_batch_items_steel_wip_id', 'steel_wip_id'),
+        Index('ix_batch_items_to_location', 'to_location')
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -245,9 +245,9 @@ class LazerCutting(Base):
         ForeignKeyConstraint(['batch_id'], ['batch.id'], name='lazer_cutting_ibfk_3'),
         ForeignKeyConstraint(['scenario_id'], ['scenarios.id'], name='lazer_cutting_ibfk_1'),
         ForeignKeyConstraint(['steel_wip_id'], ['steel_wip.id'], name='lazer_cutting_ibfk_2'),
-        Index('batch_id', 'batch_id'),
-        Index('scenario_id', 'scenario_id'),
-        Index('steel_wip_id', 'steel_wip_id')
+        Index('ix_lazer_cutting_batch_id', 'batch_id'),
+        Index('ix_lazer_cutting_scenario_id', 'scenario_id'),
+        Index('ix_lazer_cutting_steel_wip_id', 'steel_wip_id')
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -270,8 +270,8 @@ class EstimatedWips(Base):
     __table_args__ = (
         ForeignKeyConstraint(['lazer_cutting_id'], ['lazer_cutting.id'], name='estimated_wips_ibfk_1'),
         ForeignKeyConstraint(['qr_id'], ['qr_codes.id'], name='estimated_wips_ibfk_2'),
-        Index('lazer_cutting_id', 'lazer_cutting_id'),
-        Index('qr_id', 'qr_id')
+        Index('ix_estimated_wips_lazer_cutting_id', 'lazer_cutting_id'),
+        Index('ix_estimated_wips_qr_id', 'qr_id')
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
