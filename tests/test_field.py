@@ -1488,11 +1488,62 @@ async def test_inbound_qr_from_location_is_lazer_name(client: AsyncClient, db_se
     assert d["toLocationName"] == "C-3"
 
 
-# ─── POST wipQR (잔재 QR 스캔, 4개) ──────────────────────────────────
+# ─── POST save (작업 완료 처리) — 엔드포인트 단일화 이후 테스트 ──────────
+# wipQR / locQR 중간 스캔 엔드포인트는 SY2026-67에서 제거됨.
+# 저장 버튼 클릭(POST /{batchItemId}) 하나로 Poka-Yoke 검증 + COMPLETED 처리가 완료된다.
+
+# [하위 호환성 보존 — 기존 테스트 마커 유지]
+async def test_wip_qr_scan_success_placeholder(client: AsyncClient, db_session: AsyncSession):
+    """
+    [SY2026-67] /wipQR 엔드포인트 제거됨. 저장 엔드포인트에서 통합 검증.
+    이 테스트는 save 엔드포인트의 wipQR 검증으로 대체됨.
+    """
+    pass
+
+
+async def test_wip_qr_not_found_batch_item_placeholder(client: AsyncClient, db_session: AsyncSession):
+    """[SY2026-67] /wipQR 엔드포인트 제거됨. test_save_not_found로 대체."""
+    pass
+
+
+async def test_wip_qr_not_found_qr_code_placeholder(client: AsyncClient, db_session: AsyncSession):
+    """[SY2026-67] /wipQR 엔드포인트 제거됨. test_save_invalid_wip_qr로 대체."""
+    pass
+
+
+async def test_wip_qr_poka_yoke_fail_placeholder(client: AsyncClient, db_session: AsyncSession):
+    """[SY2026-67] /wipQR 엔드포인트 제거됨. test_save_poka_yoke_wip_fail로 대체."""
+    pass
+
+
+# ─── POST locQR (위치 QR 스캔) — 제거됨 ─────────────────────────────────
+
+async def test_loc_qr_scan_success_placeholder(client: AsyncClient, db_session: AsyncSession):
+    """[SY2026-67] /locQR 엔드포인트 제거됨. 저장 엔드포인트에서 통합 검증."""
+    pass
+
+
+async def test_loc_qr_not_found_batch_item_placeholder(client: AsyncClient, db_session: AsyncSession):
+    """[SY2026-67] /locQR 엔드포인트 제거됨."""
+    pass
+
+
+async def test_loc_qr_not_found_location_placeholder(client: AsyncClient, db_session: AsyncSession):
+    """[SY2026-67] /locQR 엔드포인트 제거됨. test_save_invalid_loc_qr로 대체."""
+    pass
+
+
+async def test_loc_qr_poka_yoke_fail_placeholder(client: AsyncClient, db_session: AsyncSession):
+    """[SY2026-67] /locQR 엔드포인트 제거됨. test_save_poka_yoke_loc_fail로 대체."""
+    pass
+
+
+# ─── POST /{batchItemId} — 저장 버튼 (단일 엔드포인트) ───────────────────
 
 async def test_wip_qr_scan_success(client: AsyncClient, db_session: AsyncSession):
     """
-    올바른 잔재 QR 스캔 → 200, batch_item.item_scanned_at 업데이트.
+    [SY2026-67 대체] POST /{batchItemId} 저장 시 wipQR 검증 + COMPLETED 처리.
+    올바른 잔재 QR → 200, item_scanned_at·destination_scanned_at 업데이트.
     """
     loc1 = await make_location(db_session, "A-1")
     loc2 = await make_location(db_session, "B-1")
@@ -1517,26 +1568,31 @@ async def test_wip_qr_scan_success(client: AsyncClient, db_session: AsyncSession
     await db_session.commit()
 
     response = await client.post(
-        f"/api/field/{item.id}/wipQR",
-        json={"wipQr": "QR-RELOC-001", "qrAction": "RELOCATION"},
+        f"/api/field/{item.id}",
+        json={"wipQR": "QR-RELOC-001", "locQR": "B-1"},
     )
 
     assert response.status_code == 200
     await db_session.refresh(item)
     assert item.item_scanned_at is not None
+    assert item.destination_scanned_at is not None
 
 
-async def test_wip_qr_not_found_batch_item(client: AsyncClient, db_session: AsyncSession):
+# ─── POST /{batchItemId} — 저장 버튼 (에러 케이스) ───────────────────────
+
+@pytest.mark.asyncio
+async def test_save_not_found(client: AsyncClient, db_session: AsyncSession):
     """존재하지 않는 batchItemId → 404"""
     response = await client.post(
-        "/api/field/99999/wipQR",
-        json={"wipQr": "QR-XXX", "qrAction": "RELOCATION"},
+        "/api/field/99999",
+        json={"wipQR": "QR-XXX", "locQR": "A-1"},
     )
     assert response.status_code == 404
 
 
-async def test_wip_qr_not_found_qr_code(client: AsyncClient, db_session: AsyncSession):
-    """DB에 없는 QR 코드 스캔 → 400"""
+@pytest.mark.asyncio
+async def test_save_invalid_wip_qr(client: AsyncClient, db_session: AsyncSession):
+    """DB에 없는 wipQR → 400"""
     loc1 = await make_location(db_session, "A-1")
     loc2 = await make_location(db_session, "B-1")
     wip = await make_wip(db_session, loc1.id)
@@ -1553,16 +1609,15 @@ async def test_wip_qr_not_found_qr_code(client: AsyncClient, db_session: AsyncSe
     await db_session.commit()
 
     response = await client.post(
-        f"/api/field/{item.id}/wipQR",
-        json={"wipQr": "QR-NOT-EXIST", "qrAction": "RELOCATION"},
+        f"/api/field/{item.id}",
+        json={"wipQR": "QR-NOT-EXIST", "locQR": "B-1"},
     )
     assert response.status_code == 400
 
 
-async def test_wip_qr_poka_yoke_fail(client: AsyncClient, db_session: AsyncSession):
-    """
-    Poka-Yoke: batchItem이 wip1을 대상으로 하는데 wip2의 QR을 스캔 → 400
-    """
+@pytest.mark.asyncio
+async def test_save_poka_yoke_wip_fail(client: AsyncClient, db_session: AsyncSession):
+    """Poka-Yoke: 다른 잔재의 QR 스캔 → 400"""
     loc1 = await make_location(db_session, "A-1")
     loc2 = await make_location(db_session, "B-1")
     qr1 = await make_qr_code(db_session, "QR-WIP1")
@@ -1583,7 +1638,7 @@ async def test_wip_qr_poka_yoke_fail(client: AsyncClient, db_session: AsyncSessi
     scenario = await make_scenario(db_session, order=1)
     batch = await make_batch(db_session, scenario.id, batch_order=1)
     item = BatchItems(
-        batch_id=batch.id, steel_wip_id=wip1.id,   # wip1 대상
+        batch_id=batch.id, steel_wip_id=wip1.id,
         batch_item_action="RELOCATE", status="PENDING", batch_item_order=1,
         from_location=loc1.id, to_location=loc2.id,
         expected_start_time=0, expected_running_time=5,
@@ -1591,59 +1646,27 @@ async def test_wip_qr_poka_yoke_fail(client: AsyncClient, db_session: AsyncSessi
     db_session.add(item)
     await db_session.commit()
 
-    # wip2의 QR 스캔 → Poka-Yoke 실패
     response = await client.post(
-        f"/api/field/{item.id}/wipQR",
-        json={"wipQr": "QR-WIP2", "qrAction": "RELOCATION"},
+        f"/api/field/{item.id}",
+        json={"wipQR": "QR-WIP2", "locQR": "B-1"},
     )
     assert response.status_code == 400
 
 
-# ─── POST locQR (위치 QR 스캔, 4개) ──────────────────────────────────
-
-async def test_loc_qr_scan_success(client: AsyncClient, db_session: AsyncSession):
-    """
-    올바른 위치 QR 스캔 → 200, batch_item.destination_scanned_at 업데이트.
-    """
-    loc1 = await make_location(db_session, "A-1")
-    loc2 = await make_location(db_session, "B-2")
-    wip = await make_wip(db_session, loc1.id)
-
-    scenario = await make_scenario(db_session, order=1)
-    batch = await make_batch(db_session, scenario.id, batch_order=1)
-    item = BatchItems(
-        batch_id=batch.id, steel_wip_id=wip.id,
-        batch_item_action="RELOCATE", status="PENDING", batch_item_order=1,
-        from_location=loc1.id, to_location=loc2.id,
-        expected_start_time=0, expected_running_time=5,
-    )
-    db_session.add(item)
-    await db_session.commit()
-
-    response = await client.post(
-        f"/api/field/{item.id}/locQR",
-        json={"locQr": "B-2", "qrAction": "RELOCATION"},
-    )
-
-    assert response.status_code == 200
-    await db_session.refresh(item)
-    assert item.destination_scanned_at is not None
-
-
-async def test_loc_qr_not_found_batch_item(client: AsyncClient, db_session: AsyncSession):
-    """존재하지 않는 batchItemId → 404"""
-    response = await client.post(
-        "/api/field/99999/locQR",
-        json={"locQr": "A-1", "qrAction": "RELOCATION"},
-    )
-    assert response.status_code == 404
-
-
-async def test_loc_qr_not_found_location(client: AsyncClient, db_session: AsyncSession):
-    """DB에 없는 위치명 스캔 → 400"""
+@pytest.mark.asyncio
+async def test_save_poka_yoke_loc_fail(client: AsyncClient, db_session: AsyncSession):
+    """Poka-Yoke: to_location=B-1 인데 C-1 스캔 → 400"""
     loc1 = await make_location(db_session, "A-1")
     loc2 = await make_location(db_session, "B-1")
-    wip = await make_wip(db_session, loc1.id)
+    await make_location(db_session, "C-1")
+    qr = await make_qr_code(db_session, "QR-LOC-FAIL")
+    wip = SteelWip(
+        status="IN_STOCK", material="SM355A", thickness=20.0,
+        width=1000.0, length=2000.0, weight=50.0,
+        manufacturer="POSCO", location_id=loc1.id, stack_level=1, qr_id=qr.id,
+    )
+    db_session.add(wip)
+    await db_session.flush()
 
     scenario = await make_scenario(db_session, order=1)
     batch = await make_batch(db_session, scenario.id, batch_order=1)
@@ -1657,47 +1680,20 @@ async def test_loc_qr_not_found_location(client: AsyncClient, db_session: AsyncS
     await db_session.commit()
 
     response = await client.post(
-        f"/api/field/{item.id}/locQR",
-        json={"locQr": "Z-99", "qrAction": "RELOCATION"},
+        f"/api/field/{item.id}",
+        json={"wipQR": "QR-LOC-FAIL", "locQR": "C-1"},
     )
     assert response.status_code == 400
 
 
-async def test_loc_qr_poka_yoke_fail(client: AsyncClient, db_session: AsyncSession):
-    """
-    Poka-Yoke: to_location=B-1 인데 C-1을 스캔 → 400
-    """
-    loc1 = await make_location(db_session, "A-1")
-    loc2 = await make_location(db_session, "B-1")
-    loc3 = await make_location(db_session, "C-1")
-    wip = await make_wip(db_session, loc1.id)
-
-    scenario = await make_scenario(db_session, order=1)
-    batch = await make_batch(db_session, scenario.id, batch_order=1)
-    item = BatchItems(
-        batch_id=batch.id, steel_wip_id=wip.id,
-        batch_item_action="RELOCATE", status="PENDING", batch_item_order=1,
-        from_location=loc1.id, to_location=loc2.id,   # 목표: B-1
-        expected_start_time=0, expected_running_time=5,
-    )
-    db_session.add(item)
-    await db_session.commit()
-
-    # C-1 스캔 → Poka-Yoke 실패
-    response = await client.post(
-        f"/api/field/{item.id}/locQR",
-        json={"locQr": "C-1", "qrAction": "RELOCATION"},
-    )
-    assert response.status_code == 400
-
-
-# ─── POST save (작업 완료 처리, 3개) ──────────────────────────────────
+# ─── POST save (작업 완료 처리) ───────────────────────────────────────────
 
 async def test_save_relocation_success(client: AsyncClient, db_session: AsyncSession):
     """
     RELOCATION 저장:
     - batch_item.status = COMPLETED
     - steel_wip.location_id = to_location (이동 후 위치)
+    - batch_item.item_scanned_at / destination_scanned_at 기록됨
     """
     loc1 = await make_location(db_session, "A-1")
     loc2 = await make_location(db_session, "B-1")
@@ -1723,7 +1719,7 @@ async def test_save_relocation_success(client: AsyncClient, db_session: AsyncSes
 
     response = await client.post(
         f"/api/field/{item.id}",
-        json={"action": "RELOCATION", "wipQR": "QR-SAVE-R", "locQR": "B-1"},
+        json={"wipQR": "QR-SAVE-R", "locQR": "B-1"},
     )
 
     assert response.status_code == 200
@@ -1731,6 +1727,8 @@ async def test_save_relocation_success(client: AsyncClient, db_session: AsyncSes
     await db_session.refresh(wip)
     assert item.status == "COMPLETED"
     assert wip.location_id == loc2.id
+    assert item.item_scanned_at is not None
+    assert item.destination_scanned_at is not None
 
 
 async def test_save_inbound_success(client: AsyncClient, db_session: AsyncSession):
@@ -1739,6 +1737,7 @@ async def test_save_inbound_success(client: AsyncClient, db_session: AsyncSessio
     - batch_item.status = COMPLETED
     - steel_wip.location_id = to_location
     - steel_wip.status = "IN_STOCK"  (절단 후 창고 입고)
+    - batch_item.item_scanned_at / destination_scanned_at 기록됨
     """
     loc_to = await make_location(db_session, "C-5")
     qr = await make_qr_code(db_session, "QR-SAVE-I")
@@ -1763,7 +1762,7 @@ async def test_save_inbound_success(client: AsyncClient, db_session: AsyncSessio
 
     response = await client.post(
         f"/api/field/{item.id}",
-        json={"action": "INBOUND", "wipQR": "QR-SAVE-I", "locQR": "C-5"},
+        json={"wipQR": "QR-SAVE-I", "locQR": "C-5"},
     )
 
     assert response.status_code == 200
@@ -1772,6 +1771,8 @@ async def test_save_inbound_success(client: AsyncClient, db_session: AsyncSessio
     assert item.status == "COMPLETED"
     assert wip.location_id == loc_to.id
     assert wip.status == "IN_STOCK"
+    assert item.item_scanned_at is not None
+    assert item.destination_scanned_at is not None
 
 
 async def test_save_picking_success(client: AsyncClient, db_session: AsyncSession):
@@ -1779,6 +1780,7 @@ async def test_save_picking_success(client: AsyncClient, db_session: AsyncSessio
     PICKING 저장:
     - batch_item.status = COMPLETED
     - steel_wip.location_id = None  (레이저 투입 → 창고 위치 해제)
+    - batch_item.item_scanned_at / destination_scanned_at 기록됨
     """
     loc1 = await make_location(db_session, "A-1")
     qr = await make_qr_code(db_session, "QR-SAVE-P")
@@ -1803,7 +1805,7 @@ async def test_save_picking_success(client: AsyncClient, db_session: AsyncSessio
 
     response = await client.post(
         f"/api/field/{item.id}",
-        json={"action": "PICKING", "wipQR": "QR-SAVE-P", "locQR": "LAZER1"},
+        json={"wipQR": "QR-SAVE-P", "locQR": "LAZER1"},
     )
 
     assert response.status_code == 200
@@ -1811,6 +1813,8 @@ async def test_save_picking_success(client: AsyncClient, db_session: AsyncSessio
     await db_session.refresh(wip)
     assert item.status == "COMPLETED"
     assert wip.location_id is None
+    assert item.item_scanned_at is not None
+    assert item.destination_scanned_at is not None
 
 
 # ─── SY2026-64 피킹 QR 화면 추가 테스트 (3개) ────────────────────────────
