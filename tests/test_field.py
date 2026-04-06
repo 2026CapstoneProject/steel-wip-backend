@@ -1429,6 +1429,13 @@ async def test_reloc_qr_scan_flags_true(client: AsyncClient, db_session: AsyncSe
     assert d["destinationScan"] is True
 
 
+@pytest.mark.asyncio
+async def test_reloc_qr_not_found(client: AsyncClient, db_session: AsyncSession):
+    """존재하지 않는 batchItemId → 404"""
+    response = await client.get("/api/field/99999/relocQr")
+    assert response.status_code == 404
+
+
 async def test_picking_qr_to_location_is_lazer_name(client: AsyncClient, db_session: AsyncSession):
     """
     PICKING: toLocationName = scenario.lazer_name (창고 위치가 아닌 레이저 기기명)
