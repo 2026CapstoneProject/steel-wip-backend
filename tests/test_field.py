@@ -15,6 +15,7 @@ from datetime import date, datetime
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
+import pytest
 
 from app.models import Locations, SteelWip, Scenarios, Batch, BatchItems, LazerCutting, EstimatedWips, QrCodes
 
