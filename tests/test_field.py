@@ -1562,7 +1562,7 @@ async def test_wip_qr_scan_success(client: AsyncClient, db_session: AsyncSession
 
     response = await client.post(
         f"/api/field/{item.id}",
-        json={"action": "RELOCATION", "wipQR": "QR-RELOC-001", "locQR": "B-1"},
+        json={"wipQR": "QR-RELOC-001", "locQR": "B-1"},
     )
 
     assert response.status_code == 200
@@ -1578,7 +1578,7 @@ async def test_save_not_found(client: AsyncClient, db_session: AsyncSession):
     """존재하지 않는 batchItemId → 404"""
     response = await client.post(
         "/api/field/99999",
-        json={"action": "RELOCATION", "wipQR": "QR-XXX", "locQR": "A-1"},
+        json={"wipQR": "QR-XXX", "locQR": "A-1"},
     )
     assert response.status_code == 404
 
@@ -1603,7 +1603,7 @@ async def test_save_invalid_wip_qr(client: AsyncClient, db_session: AsyncSession
 
     response = await client.post(
         f"/api/field/{item.id}",
-        json={"action": "RELOCATION", "wipQR": "QR-NOT-EXIST", "locQR": "B-1"},
+        json={"wipQR": "QR-NOT-EXIST", "locQR": "B-1"},
     )
     assert response.status_code == 400
 
@@ -1641,7 +1641,7 @@ async def test_save_poka_yoke_wip_fail(client: AsyncClient, db_session: AsyncSes
 
     response = await client.post(
         f"/api/field/{item.id}",
-        json={"action": "RELOCATION", "wipQR": "QR-WIP2", "locQR": "B-1"},
+        json={"wipQR": "QR-WIP2", "locQR": "B-1"},
     )
     assert response.status_code == 400
 
@@ -1674,7 +1674,7 @@ async def test_save_poka_yoke_loc_fail(client: AsyncClient, db_session: AsyncSes
 
     response = await client.post(
         f"/api/field/{item.id}",
-        json={"action": "RELOCATION", "wipQR": "QR-LOC-FAIL", "locQR": "C-1"},
+        json={"wipQR": "QR-LOC-FAIL", "locQR": "C-1"},
     )
     assert response.status_code == 400
 
@@ -1712,7 +1712,7 @@ async def test_save_relocation_success(client: AsyncClient, db_session: AsyncSes
 
     response = await client.post(
         f"/api/field/{item.id}",
-        json={"action": "RELOCATION", "wipQR": "QR-SAVE-R", "locQR": "B-1"},
+        json={"wipQR": "QR-SAVE-R", "locQR": "B-1"},
     )
 
     assert response.status_code == 200
@@ -1755,7 +1755,7 @@ async def test_save_inbound_success(client: AsyncClient, db_session: AsyncSessio
 
     response = await client.post(
         f"/api/field/{item.id}",
-        json={"action": "INBOUND", "wipQR": "QR-SAVE-I", "locQR": "C-5"},
+        json={"wipQR": "QR-SAVE-I", "locQR": "C-5"},
     )
 
     assert response.status_code == 200
@@ -1798,7 +1798,7 @@ async def test_save_picking_success(client: AsyncClient, db_session: AsyncSessio
 
     response = await client.post(
         f"/api/field/{item.id}",
-        json={"action": "PICKING", "wipQR": "QR-SAVE-P", "locQR": "LAZER1"},
+        json={"wipQR": "QR-SAVE-P", "locQR": "LAZER1"},
     )
 
     assert response.status_code == 200

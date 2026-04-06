@@ -641,8 +641,11 @@ async def save_qr_action(db: AsyncSession, batch_item_id: int, req: QrSaveReques
     if not wip or wip.id != item.steel_wip_id:
         raise HTTPException(status_code=400, detail="스캔된 잔재 QR이 작업 대상과 일치하지 않습니다.")
 
-    # locQR 재검증 (PICKING은 목적지가 레이저 기기이므로 생략)
-    if req.action in ("RELOCATION", "INBOUND"):
+    # batch_item_action으로 작업 유형 자동 판단 (RELOCATE / PICKING / INBOUND)
+    action = item.batch_item_action
+
+    # locQR 검증 (PICKING은 목적지가 레이저 기기이므로 생략)
+    if action in ("RELOCATE", "INBOUND"):
         loc_stmt = select(Locations).where(Locations.loc_name == req.locQR)
         loc = (await db.execute(loc_stmt)).scalars().first()
         if not loc or loc.id != item.to_location:
@@ -654,12 +657,12 @@ async def save_qr_action(db: AsyncSession, batch_item_id: int, req: QrSaveReques
     item.destination_scanned_at = now
     item.status = "COMPLETED"
 
-    if req.action == "RELOCATION":
+    if action == "RELOCATE":
         wip.location_id = item.to_location
-    elif req.action == "INBOUND":
+    elif action == "INBOUND":
         wip.location_id = item.to_location
         wip.status = "IN_STOCK"
-    elif req.action == "PICKING":
+    elif action == "PICKING":
         wip.location_id = None
 
     await db.commit()
