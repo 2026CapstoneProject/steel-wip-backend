@@ -9,7 +9,7 @@ from app.database import get_db
 from app.schemas import BaseResponse
 from app.schemas.field import (
     FieldEndData, FieldBatchItem, FieldProgressData, FieldReadyData,
-    QrScanData, QrSaveRequest,
+    QrScanData, WipQrRequest, LocQrRequest, QrSaveRequest,
 )
 
 from app.services import field_service
@@ -127,6 +127,33 @@ async def get_inbound_qr(batch_item_id: int, db: AsyncSession = Depends(get_db))
     """
     data = await field_service.get_inbound_qr(db, batch_item_id)
     return BaseResponse(status=200, message="현장 스캔 정보 조회에 성공했습니다.", data=data)
+
+
+# ─────────────────────────────────────────────
+# POST /api/field/{batchItemId}/wipQR  —  잔재 QR 스캔
+# ─────────────────────────────────────────────
+@router.post("/{batch_item_id}/wipQR", response_model=BaseResponse[None])
+async def scan_wip_qr(batch_item_id: int, req: WipQrRequest, db: AsyncSession = Depends(get_db)):
+    """
+    잔재 QR 스캔. Poka-Yoke 검증 후 item_scanned_at 기록.
+    qrAction: "RELOCATION" | "INBOUND" | "PICKING"
+    """
+    await field_service.scan_wip_qr(db, batch_item_id, req)
+    return BaseResponse(status=200, message="잔재 QR 스캔이 완료되었습니다.", data=None)
+
+
+# ─────────────────────────────────────────────
+# POST /api/field/{batchItemId}/locQR  —  위치 QR 스캔
+# ─────────────────────────────────────────────
+@router.post("/{batch_item_id}/locQR", response_model=BaseResponse[None])
+async def scan_loc_qr(batch_item_id: int, req: LocQrRequest, db: AsyncSession = Depends(get_db)):
+    """
+    위치 QR 스캔. Poka-Yoke 검증 후 destination_scanned_at 기록.
+    PICKING은 to_location=null이므로 위치 검증 생략.
+    qrAction: "RELOCATION" | "INBOUND" | "PICKING"
+    """
+    await field_service.scan_loc_qr(db, batch_item_id, req)
+    return BaseResponse(status=200, message="위치 QR 스캔이 완료되었습니다.", data=None)
 
 
 # ─────────────────────────────────────────────
