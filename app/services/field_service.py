@@ -648,7 +648,10 @@ async def save_qr_action(db: AsyncSession, batch_item_id: int, req: QrSaveReques
         if not loc or loc.id != item.to_location:
             raise HTTPException(status_code=400, detail="스캔된 위치 QR이 작업 목표 위치와 일치하지 않습니다.")
 
-    # 완료 처리
+    # 완료 처리 — 스캔 타임스탬프 기록 + 상태 변경
+    now = datetime.now(timezone.utc)
+    item.item_scanned_at = now
+    item.destination_scanned_at = now
     item.status = "COMPLETED"
 
     if req.action == "RELOCATION":
