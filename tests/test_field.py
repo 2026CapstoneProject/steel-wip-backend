@@ -15,6 +15,7 @@ from datetime import date, datetime
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
+import pytest
 
 from app.models import Locations, SteelWip, Scenarios, Batch, BatchItems, LazerCutting, EstimatedWips, QrCodes
 
@@ -1803,3 +1804,100 @@ async def test_save_picking_success(client: AsyncClient, db_session: AsyncSessio
     await db_session.refresh(wip)
     assert item.status == "COMPLETED"
     assert wip.location_id is None
+
+
+# ─── SY2026-64 피킹 QR 화면 추가 테스트 (3개) ────────────────────────────
+
+@pytest.mark.asyncio
+async def test_picking_qr_basic(client: AsyncClient, db_session: AsyncSession):
+    """
+    PICKING QR 화면 조회 시 잔재 상세 정보
+    (wipId·material·thickness·width·height·fromLocationName·toLocationName) 가 정확히 반환된다.
+    """
+    loc1 = await make_location(db_session, "C-3")
+    wip = SteelWip(
+        status="IN_STOCK", material="SM355A", thickness=18.0,
+        width=2438.0, length=6096.0, weight=200.0,
+        manufacturer="POSCO", location_id=loc1.id, stack_level=1,
+    )
+    db_session.add(wip)
+    await db_session.flush()
+
+    scenario = await make_scenario(db_session, order=1, lazer_name="LAZER1")
+    batch = await make_batch(db_session, scenario.id, batch_order=1)
+    item = BatchItems(
+        batch_id=batch.id, steel_wip_id=wip.id,
+        batch_item_action="PICKING", status="PENDING", batch_item_order=1,
+        from_location=loc1.id, to_location=None,
+        expected_start_time=0, expected_running_time=10,
+    )
+    db_session.add(item)
+    await db_session.commit()
+
+    response = await client.get(f"/api/field/{item.id}/pickingQr")
+
+    assert response.status_code == 200
+    d = response.json()["data"][0]
+    assert d["batchItemId"] == item.id
+    assert d["wipId"] == wip.id
+    assert d["material"] == "SM355A"
+    assert d["thickness"] == 18.0
+    assert d["width"] == 2438.0
+    assert d["height"] == 6096.0       # DB length → height
+    assert d["fromLocationName"] == "C-3"
+    assert d["toLocationName"] == "LAZER1"
+
+
+@pytest.mark.asyncio
+async def test_picking_qr_not_found(client: AsyncClient, db_session: AsyncSession):
+    """존재하지 않는 batchItemId → 404"""
+    response = await client.get("/api/field/99999/pickingQr")
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_picking_qr_scan_flags(client: AsyncClient, db_session: AsyncSession):
+    """
+    item_scanned_at=None → itemScan=false,
+    item_scanned_at 설정 → itemScan=true.
+    destinationScan은 PICKING에서도 동일하게 동작한다.
+    """
+    from datetime import datetime as _dt, timezone as _tz
+    loc1 = await make_location(db_session, "D-1")
+    wip = await make_wip(db_session, loc1.id)
+
+    scenario = await make_scenario(db_session, order=1, lazer_name="LAZER3")
+    batch = await make_batch(db_session, scenario.id, batch_order=1)
+    now = _dt.now(_tz.utc)
+
+    # itemScan=false, destinationScan=false
+    item_no_scan = BatchItems(
+        batch_id=batch.id, steel_wip_id=wip.id,
+        batch_item_action="PICKING", status="PENDING", batch_item_order=1,
+        from_location=loc1.id, to_location=None,
+        expected_start_time=0, expected_running_time=5,
+        item_scanned_at=None, destination_scanned_at=None,
+    )
+    db_session.add(item_no_scan)
+    await db_session.commit()
+
+    resp = await client.get(f"/api/field/{item_no_scan.id}/pickingQr")
+    d = resp.json()["data"][0]
+    assert d["itemScan"] is False
+    assert d["destinationScan"] is False
+
+    # itemScan=true, destinationScan=true
+    item_scanned = BatchItems(
+        batch_id=batch.id, steel_wip_id=wip.id,
+        batch_item_action="PICKING", status="PENDING", batch_item_order=2,
+        from_location=loc1.id, to_location=None,
+        expected_start_time=0, expected_running_time=5,
+        item_scanned_at=now, destination_scanned_at=now,
+    )
+    db_session.add(item_scanned)
+    await db_session.commit()
+
+    resp2 = await client.get(f"/api/field/{item_scanned.id}/pickingQr")
+    d2 = resp2.json()["data"][0]
+    assert d2["itemScan"] is True
+    assert d2["destinationScan"] is True
