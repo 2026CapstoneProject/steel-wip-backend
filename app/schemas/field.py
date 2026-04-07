@@ -163,7 +163,9 @@ class LocQrRequest(BaseModel):
 
 class QrSaveRequest(BaseModel):
     """저장 버튼 요청 (POST /{batchItemId}) — 작업 완료 처리.
-    action은 서버가 batch_item.batch_item_action으로 자동 판단한다.
+
+    - action은 서버가 batch_item.batch_item_action으로 자동 판단한다.
+    - 원자재 피킹(steel_wip_id=null)의 경우 wipQR·locQR 모두 null 허용.
     """
-    wipQR: str
-    locQR: str
+    wipQR: Optional[str] = None
+    locQR: Optional[str] = None
