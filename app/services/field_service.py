@@ -634,7 +634,7 @@ async def save_qr_action(db: AsyncSession, batch_item_id: int, req: QrSaveReques
     action = item.batch_item_action
 
     # wipQR 검증
-    # 원자재 피킹(steel_wip_id=null)은 QR 코드 없이 작업하므로 검증 생략
+    # 원자재 피킹(steel_wip_id=null)은 QR 없이 작업하므로 검증 생략
     wip = None
     if item.steel_wip_id is not None:
         if not req.wipQR:

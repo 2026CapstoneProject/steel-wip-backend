@@ -1929,7 +1929,7 @@ async def test_save_raw_material_picking_success(client: AsyncClient, db_session
     batch = await make_batch(db_session, scenario.id, batch_order=1)
     item = BatchItems(
         batch_id=batch.id,
-        steel_wip_id=None,           # 원자재 — WIP 없음
+        steel_wip_id=None,
         batch_item_action="PICKING",
         status="PENDING",
         batch_item_order=1,
@@ -1958,7 +1958,7 @@ async def test_save_raw_material_picking_wip_assigned_requires_qr(
     client: AsyncClient, db_session: AsyncSession
 ):
     """
-    steel_wip_id가 있는 피킹 아이템에 wipQR=None 전송 → 400
+    steel_wip_id가 있는 피킹 아이템에 wipQR=null 전송 → 400
     (원자재가 아닌데 QR을 보내지 않은 경우)
     """
     loc1 = await make_location(db_session, "A-1")
@@ -1968,7 +1968,7 @@ async def test_save_raw_material_picking_wip_assigned_requires_qr(
     batch = await make_batch(db_session, scenario.id, batch_order=1)
     item = BatchItems(
         batch_id=batch.id,
-        steel_wip_id=wip.id,         # WIP 있음 → QR 필수
+        steel_wip_id=wip.id,
         batch_item_action="PICKING",
         status="PENDING",
         batch_item_order=1,
