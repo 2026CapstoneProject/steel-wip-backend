@@ -1,6 +1,6 @@
 # app/services/lantek_service.py
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, delete
 from datetime import datetime
 import random
 
@@ -153,69 +153,46 @@ async def get_lantek_data(db: AsyncSession, scenario_id: int) -> list:
         scenarioId=scenario.id,
         scenarioTitle=scenario.title,
         scenarioDue=scenario.scenario_due,
-        lazerName=scenario.lazer_name.value if scenario.lazer_name else "LAZER1", # Enum 처리
+        lazerName=(scenario.lazer_name.value if hasattr(scenario.lazer_name, 'value') else (scenario.lazer_name or "LAZER1")),  # SQLite str / MySQL Enum 호환
         emergencyOrNot=scenario.emergency_or_not,
         lazerCutting=lazer_cutting_list
     )
     
     return [scenario_data] # 명세서 형식상 배열([])로 감싸서 반환해야 함
-    # 1. 시나리오 및 연관된 프로젝트 정보 조회
-    stmt = select(Scenarios, Projects).join(Projects, Scenarios.project_id == Projects.id).where(Scenarios.id == scenario_id)
-    result = await db.execute(stmt)
-    row = result.first()
-    
-    if not row:
-        return []
-        
-    scenario, project = row
-    
-    # 2. 시나리오에 속한 절단 지시(LazerCutting) 및 예상 잔재(EstimatedWips) 조회
-    cuttings_stmt = select(LazerCutting).where(LazerCutting.scenario_id == scenario.id)
-    cuttings_result = await db.execute(cuttings_stmt)
-    cuttings = cuttings_result.scalars().all()
-    
-    lazer_cutting_list = []
-    for cut in cuttings:
-        # 커팅별 예상 잔재 조회
-        wips_stmt = select(EstimatedWips).where(EstimatedWips.lazer_cutting_id == cut.id)
-        wips_result = await db.execute(wips_stmt)
-        wips = wips_result.scalars().all()
-        
-        # 잔재 데이터 매핑
-        estimated_wips_mapped = [
-            LantekEstimatedWip(
-                id=w.id,
-                thickness=w.thickness or 0,
-                width=w.width or 0,
-                height=w.length or 0  # DB의 length를 JSON의 height로 변환
-            ) for w in wips
-        ]
-        
-        # 커팅 데이터 매핑 (input 부분은 현재 원본 데이터가 없으므로 더미 응답 규격에 맞춤)
-        lazer_cutting_list.append(LantekCutting(
-            id=cut.id,
-            estimatedCuttingTime="03:00", # 더미 텍스트
-            input=LantekInput(
-                manufacturer="POSCO",
-                material="SM355A",
-                thickness=6.0,
-                width=1024.0,
-                height=6096.0
-            ),
-            estimatedWips=estimated_wips_mapped
-        ))
 
-    # 3. 최종 JSON 트리 구조 생성
-    scenario_data = LantekScenarioData(
-        projectId=project.id,
-        projectTitle=project.title,
-        projectDue=project.project_due,
-        scenarioId=scenario.id,
-        scenarioTitle=scenario.title,
-        scenarioDue=scenario.scenario_due,
-        lazerName=scenario.lazer_name or "LAZER1",
-        emergencyOrNot=scenario.emergency_or_not,
-        lazerCutting=lazer_cutting_list
-    )
-    
-    return [scenario_data] # 최상단을 리스트로 감싸서 반환
+
+async def delete_lantek_data(db: AsyncSession, scenario_id: int) -> None:
+    """
+    DELETE: 시나리오의 LANTEK 데이터 초기화
+    - LazerCutting, EstimatedWips, 관련 QrCodes 삭제
+    - 시나리오 status → None으로 초기화 (LANTEK 재업로드 가능하도록)
+    """
+    # 1. 해당 시나리오의 LazerCutting ID 수집
+    cutting_ids_stmt = select(LazerCutting.id).where(LazerCutting.scenario_id == scenario_id)
+    cutting_ids = (await db.execute(cutting_ids_stmt)).scalars().all()
+
+    if cutting_ids:
+        # 2. 연결된 EstimatedWips 의 qr_id 수집
+        qr_ids_stmt = select(EstimatedWips.qr_id).where(
+            EstimatedWips.lazer_cutting_id.in_(cutting_ids)
+        )
+        qr_ids = [q for q in (await db.execute(qr_ids_stmt)).scalars().all() if q]
+
+        # 3. EstimatedWips 삭제
+        await db.execute(
+            delete(EstimatedWips).where(EstimatedWips.lazer_cutting_id.in_(cutting_ids))
+        )
+        # 4. QrCodes 삭제 (더미 데이터 생성 시 만든 QR만 해당)
+        if qr_ids:
+            await db.execute(delete(QrCodes).where(QrCodes.id.in_(qr_ids)))
+        # 5. LazerCutting 삭제
+        await db.execute(
+            delete(LazerCutting).where(LazerCutting.scenario_id == scenario_id)
+        )
+
+    # 6. 시나리오 상태 초기화 (LANTEK 재업로드 가능하도록 None으로 복원)
+    scenario = await db.get(Scenarios, scenario_id)
+    if scenario:
+        scenario.status = None
+
+    await db.commit()
