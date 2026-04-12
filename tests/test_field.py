@@ -1912,3 +1912,77 @@ async def test_picking_qr_scan_flags(client: AsyncClient, db_session: AsyncSessi
     d2 = resp2.json()["data"][0]
     assert d2["itemScan"] is True
     assert d2["destinationScan"] is True
+
+
+# ─── SY2026-69 원자재 피킹 저장 테스트 (2개) ─────────────────────────────
+
+@pytest.mark.asyncio
+async def test_save_raw_material_picking_success(client: AsyncClient, db_session: AsyncSession):
+    """
+    원자재 피킹 저장:
+    - steel_wip_id = None (QR 없는 원자재)
+    - wipQR / locQR 없이 POST → 200
+    - batch_item.status = COMPLETED
+    - item_scanned_at / destination_scanned_at 기록됨
+    """
+    scenario = await make_scenario(db_session, order=1, lazer_name="LAZER1")
+    batch = await make_batch(db_session, scenario.id, batch_order=1)
+    item = BatchItems(
+        batch_id=batch.id,
+        steel_wip_id=None,
+        batch_item_action="PICKING",
+        status="PENDING",
+        batch_item_order=1,
+        from_location=None,
+        to_location=None,
+        expected_start_time=0,
+        expected_running_time=5,
+    )
+    db_session.add(item)
+    await db_session.commit()
+
+    response = await client.post(
+        f"/api/field/{item.id}",
+        json={"wipQR": None, "locQR": None},
+    )
+
+    assert response.status_code == 200
+    await db_session.refresh(item)
+    assert item.status == "COMPLETED"
+    assert item.item_scanned_at is not None
+    assert item.destination_scanned_at is not None
+
+
+@pytest.mark.asyncio
+async def test_save_raw_material_picking_wip_assigned_requires_qr(
+    client: AsyncClient, db_session: AsyncSession
+):
+    """
+    steel_wip_id가 있는 피킹 아이템에 wipQR=null 전송 → 400
+    (원자재가 아닌데 QR을 보내지 않은 경우)
+    """
+    loc1 = await make_location(db_session, "A-1")
+    wip = await make_wip(db_session, loc1.id)
+
+    scenario = await make_scenario(db_session, order=1, lazer_name="LAZER1")
+    batch = await make_batch(db_session, scenario.id, batch_order=1)
+    item = BatchItems(
+        batch_id=batch.id,
+        steel_wip_id=wip.id,
+        batch_item_action="PICKING",
+        status="PENDING",
+        batch_item_order=1,
+        from_location=loc1.id,
+        to_location=None,
+        expected_start_time=0,
+        expected_running_time=5,
+    )
+    db_session.add(item)
+    await db_session.commit()
+
+    response = await client.post(
+        f"/api/field/{item.id}",
+        json={"wipQR": None, "locQR": None},
+    )
+
+    assert response.status_code == 400

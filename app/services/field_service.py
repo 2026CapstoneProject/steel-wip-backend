@@ -630,19 +630,23 @@ async def save_qr_action(db: AsyncSession, batch_item_id: int, req: QrSaveReques
     if not item:
         raise HTTPException(status_code=404, detail="배치 아이템을 찾을 수 없습니다.")
 
-    # wipQR 재검증
-    qr_stmt = select(QrCodes).where(QrCodes.qr_code == req.wipQR)
-    qr = (await db.execute(qr_stmt)).scalars().first()
-    if not qr:
-        raise HTTPException(status_code=400, detail="등록되지 않은 잔재 QR 코드입니다.")
-
-    wip_stmt = select(SteelWip).where(SteelWip.qr_id == qr.id)
-    wip = (await db.execute(wip_stmt)).scalars().first()
-    if not wip or wip.id != item.steel_wip_id:
-        raise HTTPException(status_code=400, detail="스캔된 잔재 QR이 작업 대상과 일치하지 않습니다.")
-
     # batch_item_action으로 작업 유형 자동 판단 (RELOCATE / PICKING / INBOUND)
     action = item.batch_item_action
+
+    # wipQR 검증
+    # 원자재 피킹(steel_wip_id=null)은 QR 없이 작업하므로 검증 생략
+    wip = None
+    if item.steel_wip_id is not None:
+        if not req.wipQR:
+            raise HTTPException(status_code=400, detail="잔재 QR 코드가 필요합니다.")
+        qr_stmt = select(QrCodes).where(QrCodes.qr_code == req.wipQR)
+        qr = (await db.execute(qr_stmt)).scalars().first()
+        if not qr:
+            raise HTTPException(status_code=400, detail="등록되지 않은 잔재 QR 코드입니다.")
+        wip_stmt = select(SteelWip).where(SteelWip.qr_id == qr.id)
+        wip = (await db.execute(wip_stmt)).scalars().first()
+        if not wip or wip.id != item.steel_wip_id:
+            raise HTTPException(status_code=400, detail="스캔된 잔재 QR이 작업 대상과 일치하지 않습니다.")
 
     # locQR 검증 (PICKING은 목적지가 레이저 기기이므로 생략)
     if action in ("RELOCATE", "INBOUND"):
@@ -657,12 +661,13 @@ async def save_qr_action(db: AsyncSession, batch_item_id: int, req: QrSaveReques
     item.destination_scanned_at = now
     item.status = "COMPLETED"
 
-    if action == "RELOCATE":
-        wip.location_id = item.to_location
-    elif action == "INBOUND":
-        wip.location_id = item.to_location
-        wip.status = "IN_STOCK"
-    elif action == "PICKING":
-        wip.location_id = None
+    if wip is not None:
+        if action == "RELOCATE":
+            wip.location_id = item.to_location
+        elif action == "INBOUND":
+            wip.location_id = item.to_location
+            wip.status = "IN_STOCK"
+        elif action == "PICKING":
+            wip.location_id = None
 
     await db.commit()
