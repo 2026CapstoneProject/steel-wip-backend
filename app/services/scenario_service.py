@@ -152,7 +152,7 @@ async def get_scenario_result(db: AsyncSession, scenario_id: int) -> list:
         scenarioId=scenario.id,
         scenarioTitle=scenario.title,
         scenarioDue=scenario.scenario_due,
-        lazerName=scenario.lazer_name.value if scenario.lazer_name else "LAZER1",
+        lazerName=(scenario.lazer_name.value if hasattr(scenario.lazer_name, 'value') else (scenario.lazer_name or "LAZER1")),  # SQLite str / MySQL Enum 호환
         totalCuttingTime=total_cutting_time,
         totalWipNum=total_wip_num,
         totalCraneMove=total_crane_move,
@@ -268,7 +268,7 @@ async def get_scenario_history(
             id=scenario.id,
             title=scenario.title,
             due=scenario.scenario_due,
-            lazerName=scenario.lazer_name.value if scenario.lazer_name else "LAZER1",
+            lazerName=(scenario.lazer_name.value if hasattr(scenario.lazer_name, 'value') else (scenario.lazer_name or "LAZER1")),  # SQLite str / MySQL Enum 호환
             selectedWips=selected_wips,
             num_relocation=num_relocation, # Pydantic이 출력 시 "#relocation"으로 자동 치환
             num_crane=num_crane,           # Pydantic이 출력 시 "#crane"으로 자동 치환
@@ -379,77 +379,6 @@ async def send_scenario_to_field(db: AsyncSession, scenario_id: int):
         await delete_scenario_cascade(db, other_id)
         
     # 8. 최종 반영
-    await db.commit()
-    """
-    POST: 시나리오 현장 전송 (발행)
-    1. 선택된 시나리오 상태 ORDERED 변경 및 ordered_at 기록
-    2. 연관된 BatchItems(PICKING) 상태 PENDING 변경
-    3. 연관된 SteelWip 상태 RESERVATED 변경
-    4. 동일한 title을 가졌지만 선택되지 않은 다른 시나리오들 삭제
-    """
-    # 1. 대상 시나리오 조회 및 유효성 검사
-    scenario = await db.get(Scenarios, scenario_id)
-    if not scenario:
-        raise ValueError("전송할 시나리오를 찾을 수 없습니다.")
-        
-    if scenario.status != "DRAFT":
-        raise ValueError("대기(DRAFT) 상태인 시나리오만 전송할 수 있습니다.")
-
-    # 삭제 대상을 찾기 위해 title 미리 저장
-    target_title = scenario.title
-    
-    # 2. 선택된 시나리오 상태 및 발행 시각 변경
-    scenario.status = "ORDERED"
-    scenario.ordered_at = datetime.now() # 확실하게 현재 시각 기록
-    db.add(scenario) # 세션에 명시적으로 추가 (세션 관리에 따라 누락될 수 있으므로 방어 코드)
-    
-    # 3. Batch 조회
-    batch_stmt = select(Batch.id).where(Batch.scenario_id == scenario_id)
-    batches = (await db.execute(batch_stmt)).scalars().all()
-    
-    if batches:
-        # 4. BatchItems의 모든 작업(재배치, 피킹, 적재)을 가져옴
-        items_stmt = select(BatchItems).where(
-            BatchItems.batch_id.in_(batches)
-        )
-        all_items = (await db.execute(items_stmt)).scalars().all()
-        
-        wip_ids_for_reservation = []
-        for item in all_items:
-            # 모든 작업 지시를 PENDING(활성화) 상태로 변경
-            item.status = BatchItemStatus.PENDING.value
-            db.add(item)
-            
-            # [조건 분기] 연관된 SteelWip 상태 변경(RESERVATED)은 PICKING 대상 자재에만 적용해야 함
-            if item.batch_item_action == BatchActionType.PICKING.value and item.steel_wip_id:
-                wip_ids_for_reservation.append(item.steel_wip_id)
-                
-        # 5. 연결된 원본 SteelWip 상태 RESERVATED로 예약 변경 (PICKING 대상만)
-        if wip_ids_for_reservation:
-            await db.execute(
-                update(SteelWip)
-                .where(SteelWip.id.in_(wip_ids_for_reservation))
-                .values(status=WipStatus.RESERVATED.value)
-            )
-            
-    # 6. 동일한 title을 가졌지만 선택받지 못한 다른 시나리오들 조회
-    # (주의: status가 DRAFT인 것뿐만 아니라 앞선 2단계 로직에 의해 빈 껍데기(None)인 상태도 포함해야 합니다!)
-    other_scenarios_stmt = select(Scenarios.id).where(
-        Scenarios.title == target_title,
-        Scenarios.id != scenario_id,
-        or_(
-            Scenarios.status == "DRAFT",
-            Scenarios.status.is_(None)  # is_(None)을 통해 확실한 IS NULL 쿼리 생성
-        )
-    )
-    other_scenario_ids = (await db.execute(other_scenarios_stmt)).scalars().all()
-    
-    # 7. 버려진 시나리오들 연쇄 삭제
-    for other_id in other_scenario_ids:
-        # 기존에 작성하신 delete_scenario_cascade 함수 호출
-        await delete_scenario_cascade(db, other_id)
-        
-    # 모든 변경사항(상태 업데이트, 시간 기록, 미선택 데이터 삭제)을 한 번에 Commit
     await db.commit()
 # app/services/scenario_service.py 하단에 추가
 
