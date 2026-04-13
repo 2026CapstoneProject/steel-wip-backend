@@ -385,3 +385,73 @@ async def test_delete_lantek_can_reimport(client: AsyncClient, db_session: Async
     assert response.status_code == 200
     await db_session.refresh(scenario)
     assert scenario.status == "DRAFT"
+
+
+# ══════════════════════════════════════════════════════════════════════
+# ⑥ LantekEstimatedWip — weight 필드 반환 검증
+# ══════════════════════════════════════════════════════════════════════
+
+@pytest.mark.asyncio
+async def test_get_lantek_estimated_wip_returns_weight(
+    client: AsyncClient, db_session: AsyncSession
+):
+    """
+    GET /api/lantek/get/{scenario_id} 응답의 estimatedWips 항목에
+    weight(절단 후 무게) 필드가 포함되어야 한다.
+    make_estimated_wip 헬퍼에서 weight=40.0으로 설정되므로 그 값을 검증한다.
+    """
+    project = await make_project(db_session)
+    scenario = await make_scenario(db_session, project.id, status="DRAFT")
+    wip = await make_wip_in_stock(db_session)
+    await db_session.commit()
+
+    lc = await make_lazer_cutting(db_session, scenario.id, wip_id=wip.id, estimated_cutting_time=30)
+
+    qr = QrCodes(qr_code="QR-WEIGHT-TEST")
+    db_session.add(qr)
+    await db_session.flush()
+    await make_estimated_wip(db_session, lc.id, qr_id=qr.id)  # weight=40.0
+    await db_session.commit()
+
+    response = await client.get(f"/api/lantek/get/{scenario.id}")
+
+    assert response.status_code == 200
+    ew = response.json()["data"][0]["lazerCutting"][0]["estimatedWips"][0]
+    assert ew["weight"] == 40.0
+
+
+@pytest.mark.asyncio
+async def test_get_lantek_estimated_wip_weight_none(
+    client: AsyncClient, db_session: AsyncSession
+):
+    """
+    EstimatedWips.weight 가 null인 경우 응답에서 weight=null로 반환된다.
+    """
+    from app.models import EstimatedWips as _EW
+
+    project = await make_project(db_session)
+    scenario = await make_scenario(db_session, project.id, status="DRAFT")
+    wip = await make_wip_in_stock(db_session)
+    await db_session.commit()
+
+    lc = await make_lazer_cutting(db_session, scenario.id, wip_id=wip.id, estimated_cutting_time=10)
+
+    # weight=None인 EstimatedWip 직접 생성
+    ew_no_weight = _EW(
+        lazer_cutting_id=lc.id,
+        qr_id=None,
+        manufacturer="POSCO",
+        material="SM355A",
+        thickness=8.0,
+        width=400.0,
+        length=800.0,
+        weight=None,
+    )
+    db_session.add(ew_no_weight)
+    await db_session.commit()
+
+    response = await client.get(f"/api/lantek/get/{scenario.id}")
+
+    assert response.status_code == 200
+    ew = response.json()["data"][0]["lazerCutting"][0]["estimatedWips"][0]
+    assert ew["weight"] is None

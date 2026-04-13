@@ -392,3 +392,52 @@ async def test_update_wip_not_found(client: AsyncClient, db_session: AsyncSessio
 
     assert response.status_code == 404
     assert "찾을 수 없습니다" in response.json()["message"]
+
+
+# ══════════════════════════════════════════════════════════════════════
+# ⑤ 재고 현황 목록 — location_name 필드 반환 검증
+# ══════════════════════════════════════════════════════════════════════
+
+@pytest.mark.asyncio
+async def test_inventory_returns_location_name(client: AsyncClient, db_session: AsyncSession):
+    """
+    GET /api/steelWip 응답에 location_name 필드가 포함된다.
+    위치가 지정된 재공품은 해당 위치명(loc_name)을,
+    위치 미지정 재공품은 null을 반환해야 한다.
+    """
+    loc = await make_location(db_session, "ZONE-A-01")
+    wip_with_loc = await make_wip(db_session, location_id=loc.id)
+    wip_no_loc = await make_wip(db_session, location_id=None)
+    await db_session.commit()
+
+    response = await client.get("/api/steelWip")
+
+    assert response.status_code == 200
+    items = response.json()["data"]
+    assert len(items) == 2
+
+    by_id = {item["id"]: item for item in items}
+
+    # 위치 있는 재공품 → location_name = "ZONE-A-01"
+    assert by_id[wip_with_loc.id]["location_name"] == "ZONE-A-01"
+    # 위치 없는 재공품 → location_name = None
+    assert by_id[wip_no_loc.id]["location_name"] is None
+
+
+@pytest.mark.asyncio
+async def test_inventory_location_name_matches_filter(
+    client: AsyncClient, db_session: AsyncSession
+):
+    """
+    material 필터 적용 후에도 location_name이 정확히 반환된다.
+    """
+    loc = await make_location(db_session, "ZONE-B-02")
+    await make_wip(db_session, location_id=loc.id, material="SM355A")
+    await make_wip(db_session, location_id=None, material="SS275")   # 필터에 걸리지 않음
+    await db_session.commit()
+
+    response = await client.get("/api/steelWip", params={"material": "SM355A"})
+
+    data = response.json()["data"]
+    assert len(data) == 1
+    assert data[0]["location_name"] == "ZONE-B-02"

@@ -1986,3 +1986,173 @@ async def test_save_raw_material_picking_wip_assigned_requires_qr(
     )
 
     assert response.status_code == 400
+
+
+# ══════════════════════════════════════════════════════════════════════
+# ① QrScanData — manufacturer / weight 필드 반환 검증
+# ══════════════════════════════════════════════════════════════════════
+
+@pytest.mark.asyncio
+async def test_reloc_qr_returns_manufacturer_and_weight(
+    client: AsyncClient, db_session: AsyncSession
+):
+    """
+    GET /api/field/{batchItemId}/relocQr 응답에
+    manufacturer(제조사)와 weight(중량) 필드가 포함되어야 한다.
+    """
+    loc1 = await make_location(db_session, "A-1")
+    loc2 = await make_location(db_session, "B-1")
+    wip = SteelWip(
+        status="IN_STOCK", material="SM355A", thickness=12.0,
+        width=1500.0, length=3000.0, weight=423.0,
+        manufacturer="HYUNDAI", location_id=loc1.id, stack_level=1,
+    )
+    db_session.add(wip)
+    await db_session.flush()
+
+    scenario = await make_scenario(db_session, order=1, lazer_name="LAZER1")
+    batch = await make_batch(db_session, scenario.id, batch_order=1)
+    item = BatchItems(
+        batch_id=batch.id, steel_wip_id=wip.id,
+        batch_item_action="RELOCATE", status="PENDING", batch_item_order=1,
+        from_location=loc1.id, to_location=loc2.id,
+        expected_start_time=0, expected_running_time=8,
+    )
+    db_session.add(item)
+    await db_session.commit()
+
+    response = await client.get(f"/api/field/{item.id}/relocQr")
+
+    assert response.status_code == 200
+    d = response.json()["data"][0]
+    assert d["manufacturer"] == "HYUNDAI"
+    assert d["weight"] == 423.0
+
+
+@pytest.mark.asyncio
+async def test_picking_qr_returns_manufacturer_and_weight(
+    client: AsyncClient, db_session: AsyncSession
+):
+    """
+    GET /api/field/{batchItemId}/pickingQr 응답에
+    manufacturer와 weight 필드가 포함되어야 한다.
+    """
+    loc1 = await make_location(db_session, "A-2")
+    wip = SteelWip(
+        status="IN_STOCK", material="SS275", thickness=9.0,
+        width=1219.0, length=2438.0, weight=210.0,
+        manufacturer="DONGKUK", location_id=loc1.id, stack_level=1,
+    )
+    db_session.add(wip)
+    await db_session.flush()
+
+    scenario = await make_scenario(db_session, order=1, lazer_name="LAZER2")
+    batch = await make_batch(db_session, scenario.id, batch_order=1)
+    item = BatchItems(
+        batch_id=batch.id, steel_wip_id=wip.id,
+        batch_item_action="PICKING", status="PENDING", batch_item_order=1,
+        from_location=loc1.id, to_location=None,
+        expected_start_time=0, expected_running_time=6,
+    )
+    db_session.add(item)
+    await db_session.commit()
+
+    response = await client.get(f"/api/field/{item.id}/pickingQr")
+
+    assert response.status_code == 200
+    d = response.json()["data"][0]
+    assert d["manufacturer"] == "DONGKUK"
+    assert d["weight"] == 210.0
+
+
+@pytest.mark.asyncio
+async def test_inbound_qr_returns_manufacturer_and_weight(
+    client: AsyncClient, db_session: AsyncSession
+):
+    """
+    GET /api/field/{batchItemId}/inboundQr 응답에
+    manufacturer와 weight 필드가 포함되어야 한다.
+    """
+    loc2 = await make_location(db_session, "C-5")
+    wip = SteelWip(
+        status="IN_STOCK", material="SM490", thickness=15.0,
+        width=2000.0, length=6000.0, weight=1413.0,
+        manufacturer="POSCO", location_id=loc2.id, stack_level=2,
+    )
+    db_session.add(wip)
+    await db_session.flush()
+
+    scenario = await make_scenario(db_session, order=1, lazer_name="LAZER1")
+    batch = await make_batch(db_session, scenario.id, batch_order=1)
+    item = BatchItems(
+        batch_id=batch.id, steel_wip_id=wip.id,
+        batch_item_action="INBOUND", status="PENDING", batch_item_order=1,
+        from_location=None, to_location=loc2.id,
+        expected_start_time=0, expected_running_time=7,
+    )
+    db_session.add(item)
+    await db_session.commit()
+
+    response = await client.get(f"/api/field/{item.id}/inboundQr")
+
+    assert response.status_code == 200
+    d = response.json()["data"][0]
+    assert d["manufacturer"] == "POSCO"
+    assert d["weight"] == 1413.0
+
+
+# ══════════════════════════════════════════════════════════════════════
+# ② PickingBatchItem — expectedRunningTime 필드 반환 검증
+# ══════════════════════════════════════════════════════════════════════
+
+@pytest.mark.asyncio
+async def test_ready_picking_item_has_expected_running_time(
+    client: AsyncClient, db_session: AsyncSession
+):
+    """
+    GET /api/field/ready 응답의 picking 아이템에
+    expectedRunningTime 필드가 정확히 반환되어야 한다.
+
+    구성: batch1(생산 중 → 제외), batch2(생산 준비 대상 → 포함)
+    batch2의 PICKING 아이템에 expected_running_time=20 설정.
+    """
+    loc1 = await make_location(db_session, "A-1")
+    loc2 = await make_location(db_session, "B-1")
+    wip_dummy = await make_wip(db_session, loc1.id)
+    wip = SteelWip(
+        status="IN_STOCK", material="SM355A", thickness=6.0,
+        width=1024.0, length=2048.0, weight=98.0,
+        manufacturer="POSCO", location_id=loc1.id, stack_level=1,
+    )
+    db_session.add(wip)
+    await db_session.flush()
+
+    scenario = await make_scenario(db_session, order=1, lazer_name="LAZER1")
+    batch1 = await make_batch(db_session, scenario.id, batch_order=1)  # 생산 중 → 제외
+    batch2 = await make_batch(db_session, scenario.id, batch_order=2)  # 생산 준비 대상
+
+    # batch1 더미 (생산 중 배치)
+    await make_batch_item(db_session, batch1.id, wip_dummy.id, loc1.id, loc2.id,
+                          action="PICKING", status="PENDING")
+
+    # batch2 PICKING 아이템 — expectedRunningTime=20
+    item = BatchItems(
+        batch_id=batch2.id,
+        steel_wip_id=wip.id,
+        batch_item_action="PICKING",
+        status="PENDING",
+        batch_item_order=1,
+        from_location=loc1.id,
+        to_location=loc2.id,
+        expected_start_time=0,
+        expected_running_time=20,
+    )
+    db_session.add(item)
+    await db_session.commit()
+
+    response = await client.get("/api/field/ready")
+
+    assert response.status_code == 200
+    picking = response.json()["data"][0]["batch"][0]["picking"]
+    assert len(picking) == 1
+    assert picking[0]["expectedRunningTime"] == 20
