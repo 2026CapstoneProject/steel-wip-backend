@@ -115,7 +115,8 @@ async def get_lantek_data(db: AsyncSession, scenario_id: int) -> list:
                 id=w.id,
                 thickness=w.thickness or 0.0,
                 width=w.width or 0.0,
-                height=w.length or 0.0  # DB의 length 컬럼을 JSON 응답의 height 키로 변환
+                height=w.length or 0.0,  # DB의 length 컬럼을 JSON 응답의 height 키로 변환
+                weight=w.weight          # 절단 후 무게 (kg), 없으면 None
             ) for w in wips
         ]
         

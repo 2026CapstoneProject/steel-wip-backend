@@ -29,6 +29,7 @@ class PickingBatchItem(BaseModel):
     material: str
     fromLocationName: Optional[str] = None
     toLocationName: Optional[str] = None
+    expectedRunningTime: int = 0           # batch_item.expected_running_time (예상 소요 시간)
     # 원자재인 경우에만 채워지는 필드
     thickness: Optional[float] = None
     width: Optional[float] = None
@@ -135,10 +136,12 @@ class QrScanData(BaseModel):
     """
     batchItemId: int
     wipId: int
+    manufacturer: str                      # steel_wip.manufacturer (제조사)
     material: str
     thickness: float
     width: float
     height: float                          # steel_wip.length
+    weight: float                          # steel_wip.weight (중량)
     fromLocationName: Optional[str] = None
     toLocationName: Optional[str] = None
     itemScan: bool

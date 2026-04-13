@@ -15,6 +15,7 @@ class LantekEstimatedWip(BaseModel):
     thickness: float
     width: float
     height: float
+    weight: Optional[float] = None   # estimated_wips.weight (절단 후 무게 kg)
 
 class LantekCutting(BaseModel):
     id: int

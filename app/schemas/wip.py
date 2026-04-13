@@ -30,4 +30,5 @@ class SteelWipResponse(SteelWipBase):
     model_config = ConfigDict(from_attributes=True)
 
 class SteelWipWithQrResponse(SteelWipResponse):
-    qr_code_value: Optional[str] = None # qr_codes 테이블에서 조인해 가져올 값
+    qr_code_value: Optional[str] = None    # qr_codes 테이블에서 조인해 가져올 값
+    location_name: Optional[str] = None   # locations 테이블에서 조인해 가져올 위치명

@@ -66,6 +66,7 @@ async def _build_batch_group(db: AsyncSession, batch: Batch) -> FieldBatchGroup:
                 material=wip.material if wip else "",
                 fromLocationName=from_loc.loc_name if from_loc else None,
                 toLocationName=to_loc.loc_name if to_loc else None,
+                expectedRunningTime=item.expected_running_time or 0,
                 # 원자재(wipId == 0)인 경우에만 규격 필드를 채운다
                 thickness=wip.thickness if wip else None,
                 width=wip.width if wip else None,
@@ -527,10 +528,12 @@ async def _get_qr_scan_data(
     return QrScanData(
         batchItemId=item.id,
         wipId=wip.id if wip else 0,
+        manufacturer=wip.manufacturer if wip else "",
         material=wip.material if wip else "",
         thickness=wip.thickness if wip else 0.0,
         width=wip.width if wip else 0.0,
         height=wip.length if wip else 0.0,   # DB 컬럼명=length, 명세서 표기=height
+        weight=wip.weight if wip else 0.0,
         fromLocationName=from_loc_name,
         toLocationName=to_loc_name,
         itemScan=item.item_scanned_at is not None,
