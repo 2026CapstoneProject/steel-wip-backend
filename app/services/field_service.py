@@ -87,7 +87,7 @@ async def _build_batch_group(
                 width=wip.width if wip else None,
                 height=wip.length if wip else None,  # DB length → height 매핑
             ))
-        # INBOUND는 작업완료 화면에서는 표시 안 함 (명세서 기준)
+        # INBOUND는 생산 준비/작업 완료 화면에서는 표시하지 않음
 
     return FieldBatchGroup(relocation=relocation_items, picking=picking_items)
 
@@ -114,6 +114,39 @@ async def _is_batch_completed(db: AsyncSession, batch_id: int) -> bool:
     return total == completed
 
 
+async def _get_current_active_scenario(db: AsyncSession) -> Optional[Scenarios]:
+    """
+    현재 현장 기준이 되는 시나리오를 반환한다.
+    ORDERED / IN_PROGRESS 상태 중 scenario_order가 가장 작은 시나리오를 우선 사용한다.
+    """
+    scenario_stmt = (
+        select(Scenarios)
+        .where(Scenarios.status.in_(["ORDERED", "IN_PROGRESS"]))
+        .order_by(Scenarios.scenario_order.asc())
+    )
+    return (await db.execute(scenario_stmt)).scalars().first()
+
+
+async def _get_first_incomplete_batch(
+    db: AsyncSession, scenario_id: int
+) -> Optional[Batch]:
+    """
+    주어진 시나리오에서 아직 완료되지 않은 첫 번째 배치를 반환한다.
+    """
+    all_batches_stmt = (
+        select(Batch)
+        .where(Batch.scenario_id == scenario_id)
+        .order_by(Batch.batch_order.asc())
+    )
+    all_batches = (await db.execute(all_batches_stmt)).scalars().all()
+
+    for batch in all_batches:
+        if not await _is_batch_completed(db, batch.id):
+            return batch
+
+    return None
+
+
 # ─────────────────────────────────────────────
 # GET /api/field/end
 # ─────────────────────────────────────────────
@@ -128,11 +161,7 @@ async def get_field_end(db: AsyncSession, batch_id: Optional[int] = None) -> lis
     """
 
     # 1. 현재 진행 중인 시나리오 (최소 scenario_order) 조회
-    scenario_stmt = (
-        select(Scenarios)
-        .order_by(Scenarios.scenario_order.asc())
-    )
-    scenario = (await db.execute(scenario_stmt)).scalars().first()
+    scenario = await _get_current_active_scenario(db)
 
     if not scenario:
         return []
@@ -164,6 +193,7 @@ async def get_field_end(db: AsyncSession, batch_id: Optional[int] = None) -> lis
     completed_count: int = (await db.execute(completed_count_stmt)).scalar() or 0
 
     progress_rate = round(completed_count / total, 2) if total > 0 else 0.0
+    remaining_count = max(total - completed_count, 0)
 
     # 4. 각 Batch에서 완료된 아이템만 추출하여 그룹 빌드
     #    (배치 전체가 완료되지 않아도 개별 완료 아이템은 표시)
@@ -187,6 +217,9 @@ async def get_field_end(db: AsyncSession, batch_id: Optional[int] = None) -> lis
             scenarioId=scenario.id,
             scenarioTitle=scenario.title,
             scenarioProgressRate=progress_rate,
+            completedTaskCount=completed_count,
+            totalTaskCount=total,
+            remainingTaskCount=remaining_count,
             batch=completed_groups,
         )
     ]
@@ -293,18 +326,12 @@ async def get_field_progress(db: AsyncSession) -> list:
     """
 
     # ── 1. 현재 시나리오 (최소 scenario_order) ──────────────────────────
-    scenario_stmt = select(Scenarios).order_by(Scenarios.scenario_order.asc())
-    scenario = (await db.execute(scenario_stmt)).scalars().first()
+    scenario = await _get_current_active_scenario(db)
     if not scenario:
         return []
 
-    # ── 2. 첫 번째 배치 (최소 batch_order) ──────────────────────────────
-    batch_stmt = (
-        select(Batch)
-        .where(Batch.scenario_id == scenario.id)
-        .order_by(Batch.batch_order.asc())
-    )
-    batch = (await db.execute(batch_stmt)).scalars().first()
+    # ── 2. 첫 번째 미완료 배치 ───────────────────────────────────────────
+    batch = await _get_first_incomplete_batch(db, scenario.id)
     if not batch:
         return []
 
@@ -410,8 +437,8 @@ async def get_field_ready(db: AsyncSession) -> list:
     1. 현재 시나리오(최소 scenario_order)와 다음 시나리오(두 번째로 작은 scenario_order)를 조회한다.
     2. 현재 시나리오의 모든 Batch를 batch_order 순으로 순회하며 아래 규칙을 적용한다.
        - 이미 완료된 Batch(모든 아이템 COMPLETED) → 제외
-       - 완료되지 않은 Batch 중 첫 번째(생산 중 화면 담당) → 제외
-       - 나머지 미완료 Batch들만 생산 준비 대상으로 포함
+       - 미완료 Batch의 RELOCATE / PICKING 작업을 생산 준비 대상으로 포함
+       - INBOUND(적재) 작업은 제외
     3. 각 Batch의 RELOCATE / PICKING 아이템을 분리해 FieldBatchGroup으로 변환한다.
        INBOUND(적재) 아이템은 제외한다. (기존 _build_batch_group 헬퍼 재사용)
     4. 진행률(scenarioProgressRate) = 현재 시나리오 전체 batch_item 중 COMPLETED 비율
@@ -420,14 +447,14 @@ async def get_field_ready(db: AsyncSession) -> list:
     """
 
     # ── 1. 현재 시나리오 (최소 scenario_order) ──────────────────────────
-    scenario_stmt = select(Scenarios).order_by(Scenarios.scenario_order.asc())
-    scenario = (await db.execute(scenario_stmt)).scalars().first()
+    scenario = await _get_current_active_scenario(db)
     if not scenario:
         return []
 
     # ── 2. 다음 시나리오 (두 번째로 작은 scenario_order) ─────────────────
     next_scenario_stmt = (
         select(Scenarios)
+        .where(Scenarios.status.in_(["ORDERED", "IN_PROGRESS"]))
         .order_by(Scenarios.scenario_order.asc())
         .offset(1)
         .limit(1)
@@ -451,12 +478,13 @@ async def get_field_ready(db: AsyncSession) -> list:
     completed_count: int = (await db.execute(completed_count_stmt)).scalar() or 0
 
     progress_rate = round(completed_count / total, 2) if total > 0 else 0.0
+    remaining_count = max(total - completed_count, 0)
 
     # ── 5. 생산 준비 대상 Batch 필터링 ──────────────────────────────────────
     # batch_order 순으로 전체 배치를 순회하며:
     #   - 완료된 배치(모든 아이템 COMPLETED)       → 건너뜀
-    #   - 미완료 배치 중 첫 번째(현재 생산 중)     → 건너뜀 (생산 중 화면 담당)
-    #   - 나머지 미완료 배치                       → 생산 준비 대상
+    #   - 미완료 배치의 RELOCATE / PICKING         → 생산 준비 대상
+    #   - INBOUND(적재)                            → 제외
     all_batches_stmt = (
         select(Batch)
         .where(Batch.scenario_id == scenario.id)
@@ -464,18 +492,13 @@ async def get_field_ready(db: AsyncSession) -> list:
     )
     all_batches = (await db.execute(all_batches_stmt)).scalars().all()
 
-    in_progress_skipped = False   # 생산 중 배치를 한 번만 건너뜀
     batch_groups: list[FieldBatchGroup] = []
 
     for batch in all_batches:
         # 완료된 배치 제외
         if await _is_batch_completed(db, batch.id):
             continue
-        # 미완료 배치 중 첫 번째 = 생산 중 화면 담당 → 건너뜀
-        if not in_progress_skipped:
-            in_progress_skipped = True
-            continue
-        # 나머지 미완료 배치 → FieldBatchGroup 변환 (완료된 개별 아이템 제외)
+        # 미완료 배치 → FieldBatchGroup 변환 (완료된 개별 아이템 제외, INBOUND 제외)
         group = await _build_batch_group(db, batch, exclude_completed=True)
         # 모든 아이템이 완료되어 빈 그룹이면 건너뜀
         if not group.relocation and not group.picking:
@@ -487,6 +510,9 @@ async def get_field_ready(db: AsyncSession) -> list:
             scenarioId=scenario.id,
             scenarioTitle=scenario.title,
             scenarioProgressRate=progress_rate,
+            completedTaskCount=completed_count,
+            totalTaskCount=total,
+            remainingTaskCount=remaining_count,
             batch=batch_groups,
             nextScenarioId=next_scenario.id if next_scenario else None,
             nextScenarioTitle=next_scenario.title if next_scenario else None,

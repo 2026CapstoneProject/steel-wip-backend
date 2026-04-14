@@ -51,6 +51,9 @@ class FieldEndData(BaseModel):
     scenarioId: int
     scenarioTitle: str
     scenarioProgressRate: float   # 0.0 ~ 1.0 (완료 batch_item / 전체 batch_item)
+    completedTaskCount: int = 0
+    totalTaskCount: int = 0
+    remainingTaskCount: int = 0
     batch: List[FieldBatchGroup]  # 완료된 Batch만
 
 
@@ -116,6 +119,9 @@ class FieldReadyData(BaseModel):
     scenarioId: int
     scenarioTitle: str
     scenarioProgressRate: float          # 0.0 ~ 1.0 (완료 batch_item / 전체 batch_item)
+    completedTaskCount: int = 0
+    totalTaskCount: int = 0
+    remainingTaskCount: int = 0
     batch: List[FieldBatchGroup]         # 전체 Batch 목록 (RELOCATE / PICKING 분리)
     nextScenarioId: Optional[int] = None
     nextScenarioTitle: Optional[str] = None

@@ -1775,6 +1775,67 @@ async def test_save_inbound_success(client: AsyncClient, db_session: AsyncSessio
     assert item.destination_scanned_at is not None
 
 
+async def test_save_inbound_updates_progress_to_full_completion(
+    client: AsyncClient, db_session: AsyncSession
+):
+    """
+    생산 중 배치에 INBOUND 2개만 남은 상황에서 둘 다 저장하면
+    /api/field/ready 진행률이 100%가 되어야 한다.
+    """
+    loc_to1 = await make_location(db_session, "C-1")
+    loc_to2 = await make_location(db_session, "C-2")
+    qr1 = await make_qr_code(db_session, "QR-INBOUND-1")
+    qr2 = await make_qr_code(db_session, "QR-INBOUND-2")
+
+    wip1 = SteelWip(
+        status="REGISTERED", material="GS400", thickness=12.0,
+        width=400.0, length=1500.0, weight=10.0,
+        manufacturer="POSCO", location_id=None, stack_level=1, qr_id=qr1.id,
+    )
+    wip2 = SteelWip(
+        status="REGISTERED", material="SS275", thickness=20.0,
+        width=600.0, length=2500.0, weight=12.0,
+        manufacturer="POSCO", location_id=None, stack_level=1, qr_id=qr2.id,
+    )
+    db_session.add_all([wip1, wip2])
+    await db_session.flush()
+
+    scenario = await make_scenario(db_session, order=0)
+    batch = await make_batch(db_session, scenario.id, batch_order=1)
+    item1 = BatchItems(
+        batch_id=batch.id, steel_wip_id=wip1.id,
+        batch_item_action="INBOUND", status="PENDING", batch_item_order=1,
+        from_location=None, to_location=loc_to1.id,
+        expected_start_time=0, expected_running_time=5,
+    )
+    item2 = BatchItems(
+        batch_id=batch.id, steel_wip_id=wip2.id,
+        batch_item_action="INBOUND", status="PENDING", batch_item_order=2,
+        from_location=None, to_location=loc_to2.id,
+        expected_start_time=5, expected_running_time=5,
+    )
+    db_session.add_all([item1, item2])
+    await db_session.commit()
+
+    response_before = await client.get("/api/field/ready")
+    ready_before = response_before.json()["data"][0]
+    assert ready_before["scenarioProgressRate"] == 0.0
+
+    response_save_1 = await client.post(f"/api/field/{item1.id}", json={})
+    response_save_2 = await client.post(f"/api/field/{item2.id}", json={})
+    assert response_save_1.status_code == 200
+    assert response_save_2.status_code == 200
+
+    await db_session.refresh(item1)
+    await db_session.refresh(item2)
+    assert item1.status == "COMPLETED"
+    assert item2.status == "COMPLETED"
+
+    response_after = await client.get("/api/field/ready")
+    ready_after = response_after.json()["data"][0]
+    assert ready_after["scenarioProgressRate"] == 1.0
+
+
 async def test_save_picking_success(client: AsyncClient, db_session: AsyncSession):
     """
     PICKING 저장:
