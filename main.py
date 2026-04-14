@@ -1,11 +1,23 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.routers import users, wips, projects, lantek, scenarios, scheduler, scenario_cart, scenario_send, field
 
 app = FastAPI(title="철강 잔재 재고관리 API", version="1.0.0")
+
+# ---------------------------------------------------------
+# 0. CORS 설정
+# ---------------------------------------------------------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ---------------------------------------------------------
 # 1. 공통 에러 응답 포맷 핸들러

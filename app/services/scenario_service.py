@@ -37,10 +37,10 @@ async def get_or_create_scenario(db: AsyncSession, project_id: int, scenario_due
     result = await db.execute(stmt_existing)
     existing_scenarios = result.scalars().all()
     
-    # 2. 조회된 시나리오 중 status가 None인 시나리오가 있는지 확인 (가장 최신 것 1개)
-    #    (None이면 아직 진행되지 않은 껍데기이므로 그대로 재사용)
+    # 2. 아직 발행되지 않은 시나리오(DRAFT 또는 NULL)가 있으면 재사용
+    #    - 신규 생성 시나리오는 "DRAFT", 이전 버전은 None — 둘 다 재사용 허용
     for scenario in existing_scenarios:
-        if scenario.status is None:
+        if scenario.status in (None, "DRAFT"):
             return scenario
             
     # 3. 만약 모두 status가 None이 아니라면(이미 진행 중이라면)
@@ -66,18 +66,18 @@ async def get_or_create_scenario(db: AsyncSession, project_id: int, scenario_due
         new_title = f"{project.title}-{unique_title_count + 1}"
     
     # 4. 새 시나리오 생성 (비교군 또는 신규)
-    # status는 명시하지 않거나 None으로 두어 DB default(None)가 되도록 함.
+    # creator_id / assignee_id 는 인증 미구현 단계이므로 NULL 허용
     new_scenario = Scenarios(
         title=new_title,
         scenario_order=0,
-        status=None,  # 수정됨: DRAFT 대신 None으로 초기화
+        status="DRAFT",   # 생성 즉시 DRAFT 상태 — get_scenario_history 및 send_scenario_to_field 와 일치
         created_at=datetime.now(),
         scenario_due=scenario_due,
         lazer_name="LAZER1",
         emergency_or_not=False,
         project_id=project_id,
-        creator_id=1,   
-        assignee_id=2   
+        creator_id=None,   # 인증 미구현: NULL 허용
+        assignee_id=None   # 인증 미구현: NULL 허용
     )
     
     db.add(new_scenario)
@@ -207,10 +207,11 @@ async def get_scenario_history(
     
     # 1. 기본 조인 쿼리 (Scenarios + Projects)
     # 여기에 Scenarios.status == "DRAFT" 조건을 기본으로 추가합니다.
+    # DRAFT 또는 NULL(이전 버전 호환) 시나리오만 조회
     stmt = (
         select(Scenarios, Projects)
         .join(Projects, Scenarios.project_id == Projects.id)
-        .where(Scenarios.status == "DRAFT")  # <-- DRAFT 상태 필터링 추가
+        .where(or_(Scenarios.status == "DRAFT", Scenarios.status.is_(None)))
     )
     
     # 2. 동적 필터링 적용 (이하 로직은 기존과 완전히 동일합니다)
@@ -299,7 +300,8 @@ async def send_scenario_to_field(db: AsyncSession, scenario_id: int):
     if not scenario:
         raise ValueError("전송할 시나리오를 찾을 수 없습니다.")
         
-    if scenario.status != "DRAFT":
+    # status=None 은 이전 버전 생성 시나리오 호환 허용 (신규는 항상 DRAFT로 생성됨)
+    if scenario.status not in ("DRAFT", None):
         raise ValueError("대기(DRAFT) 상태인 시나리오만 전송할 수 있습니다.")
 
     target_title = scenario.title
