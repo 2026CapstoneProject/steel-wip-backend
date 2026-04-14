@@ -3,7 +3,7 @@
 from fastapi import APIRouter, Depends, Query
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import List
+from typing import List, Optional
 
 from app.database import get_db
 from app.schemas import BaseResponse
@@ -22,17 +22,15 @@ router = APIRouter()
 # ─────────────────────────────────────────────
 @router.get("/end", response_model=BaseResponse[List[FieldEndData]])
 async def get_field_end(
-    batchId: int = Query(..., description="방금 완료된 Batch ID"),
+    batchId: Optional[int] = Query(None, description="완료된 Batch ID (생략 시 전체 완료 아이템 반환)"),
     db: AsyncSession = Depends(get_db),
 ):
     """
     작업 완료 화면 조회
 
-    - 완료된 Batch들의 재배치 / 피킹 내역을 반환합니다.
+    - batchId 없이 호출하면 현재 시나리오의 모든 완료된 작업을 반환합니다.
+    - batchId 제공 시 해당 배치가 현재 시나리오에 속하는지 검증 후 반환합니다.
     - 시나리오 전체 진행률(scenarioProgressRate)도 함께 반환합니다.
-
-    **참고:** 원래 명세서는 GET + Request Body 구조였으나,
-    HTTP 표준에 맞게 Query Parameter(?batchId=)로 변경하였습니다.
     """
     data = await field_service.get_field_end(db, batchId)
     return BaseResponse(

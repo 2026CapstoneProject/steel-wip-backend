@@ -3,10 +3,30 @@ from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
+import asyncio
 
 from app.routers import users, wips, projects, lantek, scenarios, scheduler, scenario_cart, scenario_send, field
+from app.database import engine, async_session
+from app.models import Base
+from app.seed import seed_database
 
 app = FastAPI(title="철강 잔재 재고관리 API", version="1.0.0")
+
+# ─────────────────────────────────────────────────────
+# 시작 시 자동으로 모든 테이블 생성 및 시드 데이터 로드
+# ─────────────────────────────────────────────────────
+async def create_tables():
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+@app.on_event("startup")
+async def startup_event():
+    # 1. 테이블 생성
+    await create_tables()
+
+    # 2. 시드 데이터 로드
+    async with async_session() as db:
+        await seed_database(db)
 
 # ---------------------------------------------------------
 # 0. CORS 설정

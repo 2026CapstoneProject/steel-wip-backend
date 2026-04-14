@@ -29,16 +29,31 @@ from app.schemas.enums import BatchItemStatus
 # 내부 헬퍼
 # ─────────────────────────────────────────────
 
-async def _build_batch_group(db: AsyncSession, batch: Batch) -> FieldBatchGroup:
+async def _build_batch_group(
+    db: AsyncSession,
+    batch: Batch,
+    exclude_completed: bool = False,
+    only_completed: bool = False,
+) -> FieldBatchGroup:
     """
     Batch 하나를 받아 재배치 / 피킹 목록으로 분리한 FieldBatchGroup을 반환한다.
     batch_item_order 기준으로 정렬.
+
+    exclude_completed=True이면 COMPLETED 상태 아이템을 제외한다.
+    (생산 준비 화면에서 완료된 개별 아이템을 숨기기 위함)
+
+    only_completed=True이면 COMPLETED 상태 아이템만 포함한다.
+    (작업 완료 화면에서 완료된 아이템만 보여주기 위함)
     """
     items_stmt = (
         select(BatchItems)
         .where(BatchItems.batch_id == batch.id)
         .order_by(BatchItems.batch_item_order)
     )
+    if exclude_completed:
+        items_stmt = items_stmt.where(BatchItems.status != "COMPLETED")
+    if only_completed:
+        items_stmt = items_stmt.where(BatchItems.status == "COMPLETED")
     items = (await db.execute(items_stmt)).scalars().all()
 
     relocation_items: list[RelocationBatchItem] = []
@@ -103,22 +118,16 @@ async def _is_batch_completed(db: AsyncSession, batch_id: int) -> bool:
 # GET /api/field/end
 # ─────────────────────────────────────────────
 
-async def get_field_end(db: AsyncSession, batch_id: int) -> list:
+async def get_field_end(db: AsyncSession, batch_id: Optional[int] = None) -> list:
     """
     작업 완료 화면
     1. 현재 진행 중인 시나리오 (최소 scenario_order)를 먼저 확인한다.
-    2. 전달받은 batch_id가 그 시나리오에 속하는지 검증한다.
+    2. batch_id가 제공된 경우 해당 배치가 시나리오에 속하는지 검증한다 (생략 가능).
     3. 시나리오 전체 진행률(완료 아이템 / 전체 아이템)을 계산한다.
-    4. 해당 시나리오의 Batch 중 '완료된 Batch'(모든 아이템 COMPLETED)만 리턴한다.
-
-    * 명세서의 GET + Request Body 구조는 HTTP 표준에 맞지 않아
-      Query Parameter(?batchId=...)로 대체한다.
-
-    * 현재 시나리오는 최소 scenario_order를 가진 시나리오 (일반적으로 1).
+    4. 각 Batch에서 COMPLETED 상태 아이템만 추출하여 반환한다.
     """
 
     # 1. 현재 진행 중인 시나리오 (최소 scenario_order) 조회
-    # scenario_order는 시나리오 큐의 순서 → 최소값이 "현재 활성" 시나리오
     scenario_stmt = (
         select(Scenarios)
         .order_by(Scenarios.scenario_order.asc())
@@ -128,17 +137,17 @@ async def get_field_end(db: AsyncSession, batch_id: int) -> list:
     if not scenario:
         return []
 
-    # 2. 전달받은 batch_id가 현재 시나리오에 속하는지 검증
-    target_batch_stmt = select(Batch).where(
-        Batch.id == batch_id,
-        Batch.scenario_id == scenario.id,
-    )
-    target_batch = (await db.execute(target_batch_stmt)).scalars().first()
+    # 2. batch_id 제공 시 해당 배치가 현재 시나리오에 속하는지 검증
+    if batch_id is not None:
+        target_batch_stmt = select(Batch).where(
+            Batch.id == batch_id,
+            Batch.scenario_id == scenario.id,
+        )
+        target_batch = (await db.execute(target_batch_stmt)).scalars().first()
+        if not target_batch:
+            return []  # batchId가 현재 시나리오에 속하지 않음
 
-    if not target_batch:
-        return []  # batchId가 현재 시나리오에 속하지 않음
-
-    # 2. 이 시나리오에 속한 모든 Batch ID 수집
+    # 3. 이 시나리오에 속한 모든 Batch ID 수집
     all_batch_ids_stmt = select(Batch.id).where(Batch.scenario_id == scenario.id)
     all_batch_ids: list[int] = (await db.execute(all_batch_ids_stmt)).scalars().all()
 
@@ -156,7 +165,8 @@ async def get_field_end(db: AsyncSession, batch_id: int) -> list:
 
     progress_rate = round(completed_count / total, 2) if total > 0 else 0.0
 
-    # 4. 완료된 Batch만 필터링해서 그룹 빌드
+    # 4. 각 Batch에서 완료된 아이템만 추출하여 그룹 빌드
+    #    (배치 전체가 완료되지 않아도 개별 완료 아이템은 표시)
     all_batches_stmt = (
         select(Batch)
         .where(Batch.scenario_id == scenario.id)
@@ -166,9 +176,10 @@ async def get_field_end(db: AsyncSession, batch_id: int) -> list:
 
     completed_groups: list[FieldBatchGroup] = []
     for batch in all_batches:
-        if not await _is_batch_completed(db, batch.id):
+        group = await _build_batch_group(db, batch, only_completed=True)
+        # 완료된 아이템이 하나도 없는 배치는 건너뜀
+        if not group.relocation and not group.picking:
             continue
-        group = await _build_batch_group(db, batch)
         completed_groups.append(group)
 
     return [
@@ -368,6 +379,7 @@ async def get_field_progress(db: AsyncSession) -> list:
 
             wip_items.append(ProgressWipItem(
                 wipId=actual_wip.id,
+                batchItemId=inbound_item.id if inbound_item else None,
                 wipStatus=actual_wip.status,
                 wipName=wip_name,
                 toLocation=to_loc.loc_name if to_loc else None,
@@ -378,6 +390,7 @@ async def get_field_progress(db: AsyncSession) -> list:
             lazerCuttingId=lc.id,
             inputWipId=input_wip_id,
             material=material,
+            estimatedCuttingTime=lc.estimated_cutting_time or 0,
             wip=wip_items,
         ))
 
@@ -462,8 +475,11 @@ async def get_field_ready(db: AsyncSession) -> list:
         if not in_progress_skipped:
             in_progress_skipped = True
             continue
-        # 나머지 미완료 배치 → FieldBatchGroup 변환
-        group = await _build_batch_group(db, batch)
+        # 나머지 미완료 배치 → FieldBatchGroup 변환 (완료된 개별 아이템 제외)
+        group = await _build_batch_group(db, batch, exclude_completed=True)
+        # 모든 아이템이 완료되어 빈 그룹이면 건너뜀
+        if not group.relocation and not group.picking:
+            continue
         batch_groups.append(group)
 
     return [
@@ -623,7 +639,10 @@ async def save_qr_action(db: AsyncSession, batch_item_id: int, req: QrSaveReques
     """
     POST /api/field/{batchItemId} — 저장 버튼 클릭, 작업 완료 처리.
 
-    wipQR / locQR 재검증 후:
+    wipQR / locQR가 제공되면 Poka-Yoke 재검증 후 완료 처리한다.
+    QR 값이 없으면(mock 스캔 모드) 검증을 건너뛰고 바로 완료 처리한다.
+
+    완료 처리 시:
       - batch_item.status = COMPLETED
       - RELOCATION : steel_wip.location_id = to_location
       - INBOUND    : steel_wip.location_id = to_location, steel_wip.status = IN_STOCK
@@ -633,26 +652,28 @@ async def save_qr_action(db: AsyncSession, batch_item_id: int, req: QrSaveReques
     if not item:
         raise HTTPException(status_code=404, detail="배치 아이템을 찾을 수 없습니다.")
 
+    if item.status == "COMPLETED":
+        return  # 이미 완료된 아이템은 중복 처리하지 않음
+
     # batch_item_action으로 작업 유형 자동 판단 (RELOCATE / PICKING / INBOUND)
     action = item.batch_item_action
 
-    # wipQR 검증
-    # 원자재 피킹(steel_wip_id=null)은 QR 없이 작업하므로 검증 생략
+    # wipQR 검증 (QR 값이 제공된 경우에만)
     wip = None
     if item.steel_wip_id is not None:
-        if not req.wipQR:
-            raise HTTPException(status_code=400, detail="잔재 QR 코드가 필요합니다.")
-        qr_stmt = select(QrCodes).where(QrCodes.qr_code == req.wipQR)
-        qr = (await db.execute(qr_stmt)).scalars().first()
-        if not qr:
-            raise HTTPException(status_code=400, detail="등록되지 않은 잔재 QR 코드입니다.")
-        wip_stmt = select(SteelWip).where(SteelWip.qr_id == qr.id)
-        wip = (await db.execute(wip_stmt)).scalars().first()
-        if not wip or wip.id != item.steel_wip_id:
-            raise HTTPException(status_code=400, detail="스캔된 잔재 QR이 작업 대상과 일치하지 않습니다.")
+        wip = await db.get(SteelWip, item.steel_wip_id)
+        if req.wipQR:
+            qr_stmt = select(QrCodes).where(QrCodes.qr_code == req.wipQR)
+            qr = (await db.execute(qr_stmt)).scalars().first()
+            if not qr:
+                raise HTTPException(status_code=400, detail="등록되지 않은 잔재 QR 코드입니다.")
+            wip_stmt = select(SteelWip).where(SteelWip.qr_id == qr.id)
+            validated_wip = (await db.execute(wip_stmt)).scalars().first()
+            if not validated_wip or validated_wip.id != item.steel_wip_id:
+                raise HTTPException(status_code=400, detail="스캔된 잔재 QR이 작업 대상과 일치하지 않습니다.")
 
-    # locQR 검증 (PICKING은 목적지가 레이저 기기이므로 생략)
-    if action in ("RELOCATE", "INBOUND"):
+    # locQR 검증 (QR 값이 제공된 경우에만, PICKING은 목적지가 레이저 기기이므로 생략)
+    if req.locQR and action in ("RELOCATE", "INBOUND"):
         loc_stmt = select(Locations).where(Locations.loc_name == req.locQR)
         loc = (await db.execute(loc_stmt)).scalars().first()
         if not loc or loc.id != item.to_location:
@@ -660,8 +681,8 @@ async def save_qr_action(db: AsyncSession, batch_item_id: int, req: QrSaveReques
 
     # 완료 처리 — 스캔 타임스탬프 기록 + 상태 변경
     now = datetime.now(timezone.utc)
-    item.item_scanned_at = now
-    item.destination_scanned_at = now
+    item.item_scanned_at = item.item_scanned_at or now
+    item.destination_scanned_at = item.destination_scanned_at or now
     item.status = "COMPLETED"
 
     if wip is not None:
