@@ -36,10 +36,24 @@ class PickingBatchItem(BaseModel):
     height: Optional[float] = None  # DB의 length 컬럼에 대응
 
 
+class InboundBatchItem(BaseModel):
+    """적재(INBOUND) 작업 아이템"""
+    batchItemId: int
+    wipId: int
+    material: str
+    fromLocationName: Optional[str] = None
+    toLocationName: Optional[str] = None
+    expectedRunningTime: int = 0
+    thickness: Optional[float] = None
+    width: Optional[float] = None
+    height: Optional[float] = None  # DB의 length 컬럼에 대응
+
+
 class FieldBatchGroup(BaseModel):
-    """배치 한 묶음 — 재배치 목록 + 피킹 목록"""
+    """배치 한 묶음 — 재배치 목록 + 피킹 목록 + 적재 목록"""
     relocation: List[RelocationBatchItem]
     picking: List[PickingBatchItem]
+    inbound: List[InboundBatchItem]
 
 
 # ─────────────────────────────────────────────
@@ -129,6 +143,7 @@ class FieldReadyData(BaseModel):
     """
     scenarioId: int
     scenarioTitle: str
+    lazerName: Optional[str] = None
     scenarioProgressRate: float          # 0.0 ~ 1.0 (완료 batch_item / 전체 batch_item)
     completedTaskCount: int = 0
     totalTaskCount: int = 0

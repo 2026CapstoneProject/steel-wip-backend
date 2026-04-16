@@ -10,6 +10,7 @@ from app.models import Scenarios, Batch, BatchItems, SteelWip, Locations, QrCode
 from app.schemas.field import (
     RelocationBatchItem,
     PickingBatchItem,
+    InboundBatchItem,
     FieldBatchGroup,
     FieldEndData,
     ProgressWipItem,
@@ -37,7 +38,7 @@ async def _build_batch_group(
     only_completed: bool = False,
 ) -> FieldBatchGroup:
     """
-    Batch 하나를 받아 재배치 / 피킹 목록으로 분리한 FieldBatchGroup을 반환한다.
+    Batch 하나를 받아 재배치 / 피킹 / 적재 목록으로 분리한 FieldBatchGroup을 반환한다.
     batch_item_order 기준으로 정렬.
 
     exclude_completed=True이면 COMPLETED 상태 아이템을 제외한다.
@@ -59,6 +60,7 @@ async def _build_batch_group(
 
     relocation_items: list[RelocationBatchItem] = []
     picking_items: list[PickingBatchItem] = []
+    inbound_items: list[InboundBatchItem] = []
 
     for item in items:
         wip      = await db.get(SteelWip,  item.steel_wip_id) if item.steel_wip_id else None
@@ -88,9 +90,24 @@ async def _build_batch_group(
                 width=wip.width if wip else None,
                 height=wip.length if wip else None,  # DB length → height 매핑
             ))
-        # INBOUND는 생산 준비/작업 완료 화면에서는 표시하지 않음
+        elif item.batch_item_action == "INBOUND":
+            inbound_items.append(InboundBatchItem(
+                batchItemId=item.id,
+                wipId=wip.id if wip else 0,
+                material=wip.material if wip else "",
+                fromLocationName=from_loc.loc_name if from_loc else None,
+                toLocationName=to_loc.loc_name if to_loc else None,
+                expectedRunningTime=item.expected_running_time or 0,
+                thickness=wip.thickness if wip else None,
+                width=wip.width if wip else None,
+                height=wip.length if wip else None,
+            ))
 
-    return FieldBatchGroup(relocation=relocation_items, picking=picking_items)
+    return FieldBatchGroup(
+        relocation=relocation_items,
+        picking=picking_items,
+        inbound=inbound_items,
+    )
 
 
 async def _is_batch_completed(db: AsyncSession, batch_id: int) -> bool:
@@ -294,7 +311,7 @@ async def get_field_end(db: AsyncSession, batch_id: Optional[int] = None) -> lis
         if not await _is_batch_completed(db, batch.id):
             continue
         group = await _build_batch_group(db, batch, only_completed=True)
-        if not group.relocation and not group.picking:
+        if not group.relocation and not group.picking and not group.inbound:
             continue
         completed_groups.append(group)
 
@@ -583,8 +600,9 @@ async def get_field_ready(db: AsyncSession) -> list:
 
     # ── 5. 생산 준비 대상 배치 결정 ───────────────────────────────────────
     # 정의:
-    #   - 현재 배치에 RELOCATE/PICKING이 남아 있으면 생산 준비 페이지에서 그 배치만 보여준다.
-    #   - 현재 배치에 INBOUND만 남아 있으면 생산 중 단계이므로 ready 목록은 비운다.
+    #   - 생산 준비 페이지에서는 현재 시나리오의 모든 미완료 RELOCATE/PICKING 작업을 보여준다.
+    #   - 즉, 각 배치의 ready 작업을 batch_order 순으로 모두 노출한다.
+    #   - INBOUND만 남은 작업은 생산 중 단계이므로 ready 목록에는 포함하지 않는다.
     active_ready_batch = await _get_active_ready_batch(db, scenario.id)
     active_processing_batch = await _get_active_processing_batch(db, scenario.id)
 
@@ -604,8 +622,15 @@ async def get_field_ready(db: AsyncSession) -> list:
             action="INBOUND",
         )
 
-    if active_ready_batch:
-        group = await _build_batch_group(db, active_ready_batch, exclude_completed=True)
+    all_batches_stmt = (
+        select(Batch)
+        .where(Batch.scenario_id == scenario.id)
+        .order_by(Batch.batch_order.asc())
+    )
+    all_batches = (await db.execute(all_batches_stmt)).scalars().all()
+
+    for batch in all_batches:
+        group = await _build_batch_group(db, batch, exclude_completed=True)
         if group.relocation or group.picking:
             batch_groups.append(group)
 
@@ -613,6 +638,11 @@ async def get_field_ready(db: AsyncSession) -> list:
         FieldReadyData(
             scenarioId=scenario.id,
             scenarioTitle=scenario.title,
+            lazerName=(
+                scenario.lazer_name.value
+                if hasattr(scenario.lazer_name, "value")
+                else scenario.lazer_name
+            ),
             scenarioProgressRate=progress_rate,
             completedTaskCount=completed_count,
             totalTaskCount=total,
