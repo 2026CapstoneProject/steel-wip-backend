@@ -9,7 +9,7 @@ from app.database import get_db
 from app.schemas import BaseResponse
 from app.schemas.field import (
     FieldEndData, FieldBatchItem, FieldProgressData, FieldReadyData,
-    QrScanData, QrSaveRequest,
+    QrScanData, QrSaveRequest, QrSaveResult,
 )
 
 from app.services import field_service
@@ -130,15 +130,15 @@ async def get_inbound_qr(batch_item_id: int, db: AsyncSession = Depends(get_db))
 # ─────────────────────────────────────────────
 # POST /api/field/{batchItemId}  —  저장 (작업 완료 처리)
 # ─────────────────────────────────────────────
-@router.post("/{batch_item_id}", response_model=BaseResponse[None])
+@router.post("/{batch_item_id}", response_model=BaseResponse[QrSaveResult])
 async def save_qr_action(batch_item_id: int, req: QrSaveRequest, db: AsyncSession = Depends(get_db)):
     """
     저장 버튼 클릭 — 작업 완료 처리.
     wipQR/locQR 재검증 → batch_item COMPLETED → steel_wip 위치/상태 업데이트.
     action: "RELOCATION" | "INBOUND" | "PICKING"
     """
-    await field_service.save_qr_action(db, batch_item_id, req)
-    return BaseResponse(status=200, message="작업이 완료 처리되었습니다.", data=None)
+    result = await field_service.save_qr_action(db, batch_item_id, req)
+    return BaseResponse(status=200, message="작업이 완료 처리되었습니다.", data=result)
 
 
 # ─────────────────────────────────────────────

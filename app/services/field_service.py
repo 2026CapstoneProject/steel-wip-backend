@@ -20,6 +20,7 @@ from app.schemas.field import (
     WipQrRequest,
     LocQrRequest,
     QrSaveRequest,
+    QrSaveResult,
 )
 from app.schemas.field import FieldBatchItem, FieldWipDetail
 from app.schemas.enums import BatchItemStatus
@@ -117,7 +118,8 @@ async def _is_batch_completed(db: AsyncSession, batch_id: int) -> bool:
 async def _get_current_active_scenario(db: AsyncSession) -> Optional[Scenarios]:
     """
     현재 현장 기준이 되는 시나리오를 반환한다.
-    ORDERED / IN_PROGRESS 상태 중 scenario_order가 가장 작은 시나리오를 우선 사용한다.
+    Field에서는 발행된 시나리오(ORDERED/IN_PROGRESS)만 활성 시나리오로 본다.
+    아직 발행되지 않은 DRAFT/None 시나리오는 Office 전용 상태이므로 제외한다.
     """
     scenario_stmt = (
         select(Scenarios)
@@ -142,6 +144,90 @@ async def _get_first_incomplete_batch(
 
     for batch in all_batches:
         if not await _is_batch_completed(db, batch.id):
+            return batch
+
+    return None
+
+
+async def _count_incomplete_items_in_batch(
+    db: AsyncSession,
+    batch_id: int,
+    action: Optional[str] = None,
+) -> int:
+    stmt = select(func.count(BatchItems.id)).where(
+        BatchItems.batch_id == batch_id,
+        BatchItems.status != "COMPLETED",
+    )
+    if action:
+        stmt = stmt.where(BatchItems.batch_item_action == action)
+    return (await db.execute(stmt)).scalar() or 0
+
+
+async def _count_incomplete_items_in_batch_actions(
+    db: AsyncSession,
+    batch_id: int,
+    actions: list[str],
+) -> int:
+    stmt = select(func.count(BatchItems.id)).where(
+        BatchItems.batch_id == batch_id,
+        BatchItems.status != "COMPLETED",
+        BatchItems.batch_item_action.in_(actions),
+    )
+    return (await db.execute(stmt)).scalar() or 0
+
+
+async def _get_active_ready_batch(db: AsyncSession, scenario_id: int) -> Optional[Batch]:
+    all_batches_stmt = (
+        select(Batch)
+        .where(Batch.scenario_id == scenario_id)
+        .order_by(Batch.batch_order.asc())
+    )
+    all_batches = (await db.execute(all_batches_stmt)).scalars().all()
+
+    for batch in all_batches:
+        pending_ready_count = await _count_incomplete_items_in_batch_actions(
+            db,
+            batch.id,
+            ["RELOCATE", "PICKING"],
+        )
+        if pending_ready_count > 0:
+            return batch
+
+        pending_total = await _count_incomplete_items_in_batch(db, batch.id)
+        if pending_total > 0:
+            # 현재 배치가 생산 중(INBOUND만 남음)이면 뒤 배치는 아직 ready에 노출하지 않는다.
+            return None
+
+    return None
+
+
+async def _get_active_processing_batch(db: AsyncSession, scenario_id: int) -> Optional[Batch]:
+    all_batches_stmt = (
+        select(Batch)
+        .where(Batch.scenario_id == scenario_id)
+        .order_by(Batch.batch_order.asc())
+    )
+    all_batches = (await db.execute(all_batches_stmt)).scalars().all()
+
+    for batch in all_batches:
+        pending_ready_count = await _count_incomplete_items_in_batch_actions(
+            db,
+            batch.id,
+            ["RELOCATE", "PICKING"],
+        )
+        if pending_ready_count > 0:
+            return None
+
+        pending_total = await _count_incomplete_items_in_batch(db, batch.id)
+        if pending_total == 0:
+            continue
+
+        pending_inbound_count = await _count_incomplete_items_in_batch(
+            db,
+            batch.id,
+            action="INBOUND",
+        )
+        if pending_inbound_count > 0:
             return batch
 
     return None
@@ -195,8 +281,7 @@ async def get_field_end(db: AsyncSession, batch_id: Optional[int] = None) -> lis
     progress_rate = round(completed_count / total, 2) if total > 0 else 0.0
     remaining_count = max(total - completed_count, 0)
 
-    # 4. 각 Batch에서 완료된 아이템만 추출하여 그룹 빌드
-    #    (배치 전체가 완료되지 않아도 개별 완료 아이템은 표시)
+    # 4. 배치 전체가 완료된 경우에만 완료 목록에 포함한다.
     all_batches_stmt = (
         select(Batch)
         .where(Batch.scenario_id == scenario.id)
@@ -206,8 +291,9 @@ async def get_field_end(db: AsyncSession, batch_id: Optional[int] = None) -> lis
 
     completed_groups: list[FieldBatchGroup] = []
     for batch in all_batches:
+        if not await _is_batch_completed(db, batch.id):
+            continue
         group = await _build_batch_group(db, batch, only_completed=True)
-        # 완료된 아이템이 하나도 없는 배치는 건너뜀
         if not group.relocation and not group.picking:
             continue
         completed_groups.append(group)
@@ -226,37 +312,36 @@ async def get_field_end(db: AsyncSession, batch_id: Optional[int] = None) -> lis
 
 
 async def get_live_field_data(db: AsyncSession, lazer_name: str) -> List[FieldBatchItem]:
-    # 1. 진행 중인(ORDERED, IN_PROGRESS) 시나리오들 조회 (해당 레이저 담당)
-    scenario_stmt = select(Scenarios.id).where(
-        Scenarios.lazer_name == lazer_name,
-        Scenarios.status.in_(["ORDERED", "IN_PROGRESS"])
+    scenario_stmt = (
+        select(Scenarios)
+        .where(
+            Scenarios.lazer_name == lazer_name,
+            Scenarios.status.in_(["ORDERED", "IN_PROGRESS"]),
+        )
+        .order_by(Scenarios.scenario_order.asc())
     )
-    scenario_ids = (await db.execute(scenario_stmt)).scalars().all()
-    
-    if not scenario_ids:
+    scenario = (await db.execute(scenario_stmt)).scalars().first()
+    if not scenario:
         return []
 
-    # 2. 해당 시나리오들의 첫 번째 Batch(batch_order == 1) ID들 조회
-    batch_stmt = select(Batch.id).where(
-        Batch.scenario_id.in_(scenario_ids),
-        Batch.batch_order == 1
+    batch_stmt = (
+        select(Batch)
+        .where(Batch.scenario_id == scenario.id)
+        .order_by(Batch.batch_order.asc())
     )
-    batch_ids = (await db.execute(batch_stmt)).scalars().all()
-    
-    if not batch_ids:
+    batches = (await db.execute(batch_stmt)).scalars().all()
+    if not batches:
         return []
-
-    # 3. 해당 Batch에 속한 BatchItems 중 PENDING 또는 IN_PROGRESS 상태인 것들 시간순 조회
+    batch_map = {batch.id: batch for batch in batches}
+    batch_ids = list(batch_map.keys())
     item_stmt = (
         select(BatchItems)
         .where(
             BatchItems.batch_id.in_(batch_ids),
-            BatchItems.status.in_([BatchItemStatus.PENDING.value, BatchItemStatus.IN_PROGRESS.value])
         )
-        .order_by(BatchItems.expected_start_time.asc())
+        .order_by(BatchItems.batch_id.asc(), BatchItems.batch_item_order.asc(), BatchItems.expected_start_time.asc())
     )
-    items_result = await db.execute(item_stmt)
-    batch_items = items_result.scalars().all()
+    batch_items = (await db.execute(item_stmt)).scalars().all()
 
     response_list = []
     
@@ -287,9 +372,15 @@ async def get_live_field_data(db: AsyncSession, lazer_name: str) -> List[FieldBa
         # 5. 출발지, 도착지 구역 이름 조회
         from_loc = await db.get(Locations, item.from_location) if item.from_location else None
         to_loc = await db.get(Locations, item.to_location) if item.to_location else None
+        batch = batch_map.get(item.batch_id)
 
         # 6. 스키마에 맞게 조립
         response_list.append(FieldBatchItem(
+            scenarioId=scenario.id,
+            scenarioTitle=scenario.title,
+            lazerName=lazer_name,
+            batchId=item.batch_id,
+            batchOrder=batch.batch_order if batch else None,
             batchItemId=str(item.id),
             status=item.status,
             batchItemAction=item.batch_item_action,
@@ -330,8 +421,9 @@ async def get_field_progress(db: AsyncSession) -> list:
     if not scenario:
         return []
 
-    # ── 2. 첫 번째 미완료 배치 ───────────────────────────────────────────
-    batch = await _get_first_incomplete_batch(db, scenario.id)
+    # ── 2. 현재 생산 중 배치 ─────────────────────────────────────────────
+    # RELOCATE/PICKING이 모두 끝나고 INBOUND만 남은 배치만 생산 중으로 본다.
+    batch = await _get_active_processing_batch(db, scenario.id)
     if not batch:
         return []
 
@@ -347,6 +439,15 @@ async def get_field_progress(db: AsyncSession) -> list:
 
     # ── 4. 총 예상 소요 시간 (분) ────────────────────────────────────────
     expected_total = sum(lc.estimated_cutting_time or 0 for lc in lazer_cuttings)
+    batch_total_stmt = select(func.count(BatchItems.id)).where(BatchItems.batch_id == batch.id)
+    batch_total = (await db.execute(batch_total_stmt)).scalar() or 0
+    batch_completed_stmt = select(func.count(BatchItems.id)).where(
+        BatchItems.batch_id == batch.id,
+        BatchItems.status == "COMPLETED",
+    )
+    batch_completed = (await db.execute(batch_completed_stmt)).scalar() or 0
+    batch_progress_rate = round(batch_completed / batch_total, 2) if batch_total > 0 else 0.0
+    batch_remaining = max(batch_total - batch_completed, 0)
 
     # ── 5. 각 lazer_cutting별 데이터 구성 ───────────────────────────────
     lc_groups: list[ProgressLazerCutting] = []
@@ -422,6 +523,12 @@ async def get_field_progress(db: AsyncSession) -> list:
         ))
 
     return [FieldProgressData(
+        scenarioId=scenario.id,
+        scenarioTitle=scenario.title,
+        batchProgressRate=batch_progress_rate,
+        completedTaskCount=batch_completed,
+        totalTaskCount=batch_total,
+        remainingTaskCount=batch_remaining,
         expectedTotalRunningTime=expected_total,
         lazer_cutting=lc_groups,
     )]
@@ -452,13 +559,7 @@ async def get_field_ready(db: AsyncSession) -> list:
         return []
 
     # ── 2. 다음 시나리오 (두 번째로 작은 scenario_order) ─────────────────
-    next_scenario_stmt = (
-        select(Scenarios)
-        .where(Scenarios.status.in_(["ORDERED", "IN_PROGRESS"]))
-        .order_by(Scenarios.scenario_order.asc())
-        .offset(1)
-        .limit(1)
-    )
+    next_scenario_stmt = select(Scenarios).order_by(Scenarios.scenario_order.asc()).offset(1).limit(1)
     next_scenario = (await db.execute(next_scenario_stmt)).scalars().first()
 
     # ── 3. 현재 시나리오의 모든 Batch ID 수집 ────────────────────────────
@@ -480,30 +581,33 @@ async def get_field_ready(db: AsyncSession) -> list:
     progress_rate = round(completed_count / total, 2) if total > 0 else 0.0
     remaining_count = max(total - completed_count, 0)
 
-    # ── 5. 생산 준비 대상 Batch 필터링 ──────────────────────────────────────
-    # batch_order 순으로 전체 배치를 순회하며:
-    #   - 완료된 배치(모든 아이템 COMPLETED)       → 건너뜀
-    #   - 미완료 배치의 RELOCATE / PICKING         → 생산 준비 대상
-    #   - INBOUND(적재)                            → 제외
-    all_batches_stmt = (
-        select(Batch)
-        .where(Batch.scenario_id == scenario.id)
-        .order_by(Batch.batch_order)
-    )
-    all_batches = (await db.execute(all_batches_stmt)).scalars().all()
+    # ── 5. 생산 준비 대상 배치 결정 ───────────────────────────────────────
+    # 정의:
+    #   - 현재 배치에 RELOCATE/PICKING이 남아 있으면 생산 준비 페이지에서 그 배치만 보여준다.
+    #   - 현재 배치에 INBOUND만 남아 있으면 생산 중 단계이므로 ready 목록은 비운다.
+    active_ready_batch = await _get_active_ready_batch(db, scenario.id)
+    active_processing_batch = await _get_active_processing_batch(db, scenario.id)
 
     batch_groups: list[FieldBatchGroup] = []
+    current_batch_remaining_count = 0
+    current_batch_pending_inbound_count = 0
 
-    for batch in all_batches:
-        # 완료된 배치 제외
-        if await _is_batch_completed(db, batch.id):
-            continue
-        # 미완료 배치 → FieldBatchGroup 변환 (완료된 개별 아이템 제외, INBOUND 제외)
-        group = await _build_batch_group(db, batch, exclude_completed=True)
-        # 모든 아이템이 완료되어 빈 그룹이면 건너뜀
-        if not group.relocation and not group.picking:
-            continue
-        batch_groups.append(group)
+    current_focus_batch = active_ready_batch or active_processing_batch
+    if current_focus_batch:
+        current_batch_remaining_count = await _count_incomplete_items_in_batch(
+            db,
+            current_focus_batch.id,
+        )
+        current_batch_pending_inbound_count = await _count_incomplete_items_in_batch(
+            db,
+            current_focus_batch.id,
+            action="INBOUND",
+        )
+
+    if active_ready_batch:
+        group = await _build_batch_group(db, active_ready_batch, exclude_completed=True)
+        if group.relocation or group.picking:
+            batch_groups.append(group)
 
     return [
         FieldReadyData(
@@ -513,6 +617,8 @@ async def get_field_ready(db: AsyncSession) -> list:
             completedTaskCount=completed_count,
             totalTaskCount=total,
             remainingTaskCount=remaining_count,
+            currentBatchRemainingTaskCount=current_batch_remaining_count,
+            currentBatchPendingInboundCount=current_batch_pending_inbound_count,
             batch=batch_groups,
             nextScenarioId=next_scenario.id if next_scenario else None,
             nextScenarioTitle=next_scenario.title if next_scenario else None,
@@ -661,7 +767,7 @@ async def scan_loc_qr(db: AsyncSession, batch_item_id: int, req: LocQrRequest) -
     await db.commit()
 
 
-async def save_qr_action(db: AsyncSession, batch_item_id: int, req: QrSaveRequest) -> None:
+async def save_qr_action(db: AsyncSession, batch_item_id: int, req: QrSaveRequest) -> QrSaveResult:
     """
     POST /api/field/{batchItemId} — 저장 버튼 클릭, 작업 완료 처리.
 
@@ -679,7 +785,19 @@ async def save_qr_action(db: AsyncSession, batch_item_id: int, req: QrSaveReques
         raise HTTPException(status_code=404, detail="배치 아이템을 찾을 수 없습니다.")
 
     if item.status == "COMPLETED":
-        return  # 이미 완료된 아이템은 중복 처리하지 않음
+        remaining_after_complete = await _count_incomplete_items_in_batch(db, item.batch_id)
+        pending_inbound_after_complete = await _count_incomplete_items_in_batch(
+            db,
+            item.batch_id,
+            action="INBOUND",
+        )
+        return QrSaveResult(
+            batchItemId=item.id,
+            action=item.batch_item_action,
+            currentBatchRemainingTaskCount=remaining_after_complete,
+            currentBatchPendingInboundCount=pending_inbound_after_complete,
+            shouldMoveToReady=remaining_after_complete == 0,
+        )
 
     # batch_item_action으로 작업 유형 자동 판단 (RELOCATE / PICKING / INBOUND)
     action = item.batch_item_action
@@ -706,6 +824,8 @@ async def save_qr_action(db: AsyncSession, batch_item_id: int, req: QrSaveReques
             raise HTTPException(status_code=400, detail="스캔된 위치 QR이 작업 목표 위치와 일치하지 않습니다.")
 
     # 완료 처리 — 스캔 타임스탬프 기록 + 상태 변경
+    # 프론트 mock 스캔 플로우에서는 QR 성공 여부를 로컬 state로만 관리하므로,
+    # wipQR/locQR가 비어 있더라도 저장 자체는 허용하고 현재 시각으로 스캔 완료 처리한다.
     now = datetime.now(timezone.utc)
     item.item_scanned_at = item.item_scanned_at or now
     item.destination_scanned_at = item.destination_scanned_at or now
@@ -721,3 +841,16 @@ async def save_qr_action(db: AsyncSession, batch_item_id: int, req: QrSaveReques
             wip.location_id = None
 
     await db.commit()
+    remaining_after_complete = await _count_incomplete_items_in_batch(db, item.batch_id)
+    pending_inbound_after_complete = await _count_incomplete_items_in_batch(
+        db,
+        item.batch_id,
+        action="INBOUND",
+    )
+    return QrSaveResult(
+        batchItemId=item.id,
+        action=action,
+        currentBatchRemainingTaskCount=remaining_after_complete,
+        currentBatchPendingInboundCount=pending_inbound_after_complete,
+        shouldMoveToReady=remaining_after_complete == 0,
+    )

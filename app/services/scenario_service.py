@@ -13,18 +13,32 @@ from app.models import (
     Projects, Scenarios, LazerCutting, Batch, BatchItems, 
     SteelWip, Locations, EstimatedWips, QrCodes
 )
-from app.schemas.scenario import ScenarioResultData, BatchItemDetail
+from app.schemas.scenario import (
+    ScenarioResultData,
+    BatchItemDetail,
+    ScenarioSolverSummary,
+    ScenarioJobScheduleItem,
+    ScenarioCraneScheduleItem,
+)
 from app.schemas.enums import BatchActionType
 
 from app.schemas.scenario import ScenarioHistoryItem, ProjectScenarioHistory, SentScenarioItem, SentProjectHistory
 from app.schemas.batch_item import BatchItemStatus
 from app.schemas.wip import WipStatus
+from app.services.lantek_service import ensure_scenario_execution_plan
+from app.services.demo_solver_service import (
+    DEMO_SOLVER_SUMMARY,
+    DEMO_JOB_SCHEDULE,
+    DEMO_CRANE_SCHEDULE,
+    load_demo_production_plan_specs,
+    matches_demo_solver_result,
+)
 
 async def get_or_create_scenario(db: AsyncSession, project_id: int, scenario_due: date) -> Scenarios:
     """
     POST: 생산계획명 생성 로직 (수정됨)
     - 동일한 프로젝트 + due를 가진 시나리오 중 status가 None인 것이 있다면 재사용
-    - 만약 status가 None이 아닌 것만 존재한다면, 가장 최근의 시나리오 title을 그대로 복사하여 
+    - 만약 status가 None이 아닌 것만 존재한다면, 가장 최근의 시나리오 title을 그대로 복사하여
       status=None 인 새로운 시나리오(비교군)를 생성
     """
     
@@ -37,10 +51,9 @@ async def get_or_create_scenario(db: AsyncSession, project_id: int, scenario_due
     result = await db.execute(stmt_existing)
     existing_scenarios = result.scalars().all()
     
-    # 2. 아직 발행되지 않은 시나리오(DRAFT 또는 NULL)가 있으면 재사용
-    #    - 신규 생성 시나리오는 "DRAFT", 이전 버전은 None — 둘 다 재사용 허용
+    # 2. 아직 편집 중인 시나리오(status=None)가 있으면 재사용
     for scenario in existing_scenarios:
-        if scenario.status in (None, "DRAFT"):
+        if scenario.status is None:
             return scenario
             
     # 3. 만약 모두 status가 None이 아니라면(이미 진행 중이라면)
@@ -70,7 +83,7 @@ async def get_or_create_scenario(db: AsyncSession, project_id: int, scenario_due
     new_scenario = Scenarios(
         title=new_title,
         scenario_order=0,
-        status="DRAFT",   # 생성 즉시 DRAFT 상태 — get_scenario_history 및 send_scenario_to_field 와 일치
+        status=None,
         created_at=datetime.now(),
         scenario_due=scenario_due,
         lazer_name="LAZER1",
@@ -97,9 +110,14 @@ async def get_scenario_result(db: AsyncSession, scenario_id: int) -> list:
         return []
     scenario, project = row
 
-    # 2. 총 절단 시간 계산 (LazerCutting)
-    cutting_stmt = select(func.sum(LazerCutting.estimated_cutting_time)).where(LazerCutting.scenario_id == scenario_id)
-    total_cutting_time = (await db.execute(cutting_stmt)).scalar() or 0
+    cuttings = (
+        await db.execute(
+            select(LazerCutting)
+            .where(LazerCutting.scenario_id == scenario_id)
+            .order_by(LazerCutting.id.asc())
+        )
+    ).scalars().all()
+    total_cutting_time = sum(cut.estimated_cutting_time or 0 for cut in cuttings)
 
     # 3. Batch 및 BatchItems 조회 (WIP, Location 정보 포함)
     batch_stmt = select(Batch).where(Batch.scenario_id == scenario_id)
@@ -110,8 +128,15 @@ async def get_scenario_result(db: AsyncSession, scenario_id: int) -> list:
     total_wip_num = 0
     total_move_num = 0
 
+    items_result = []
+    production_plan_specs = load_demo_production_plan_specs()
+    wip_detail_map: dict[int, dict] = {}
     if batch_ids:
-        items_stmt = select(BatchItems).where(BatchItems.batch_id.in_(batch_ids)).order_by(BatchItems.expected_start_time)
+        items_stmt = (
+            select(BatchItems)
+            .where(BatchItems.batch_id.in_(batch_ids))
+            .order_by(BatchItems.expected_start_time, BatchItems.batch_item_order)
+        )
         items_result = (await db.execute(items_stmt)).scalars().all()
 
         for item in items_result:
@@ -121,6 +146,8 @@ async def get_scenario_result(db: AsyncSession, scenario_id: int) -> list:
 
             # WIP 정보
             wip = await db.get(SteelWip, item.steel_wip_id) if item.steel_wip_id else None
+            production_plan_spec = production_plan_specs.get(item.steel_wip_id)
+            qr_code = await db.get(QrCodes, wip.qr_id) if wip and wip.qr_id else None
             
             # Location 명칭 치환
             from_loc = await db.get(Locations, item.from_location) if item.from_location else None
@@ -131,20 +158,88 @@ async def get_scenario_result(db: AsyncSession, scenario_id: int) -> list:
 
             batch_items.append(BatchItemDetail(
                 batchItemAction=action_name,
-                steelWipId=wip.id if wip else 0,
+                steelWipId=item.steel_wip_id or (wip.id if wip else 0),
+                qrCode=(qr_code.qr_code if qr_code and qr_code.qr_code else None),
                 manufacturer=wip.manufacturer if wip else "알수없음",
-                material=wip.material if wip else "알수없음",
-                thickness=wip.thickness if wip else 0.0,
-                width=wip.width if wip else 0.0,
-                length=wip.length if wip else 0.0,
+                material=(production_plan_spec.material if production_plan_spec else (wip.material if wip else "알수없음")),
+                thickness=(production_plan_spec.thickness if production_plan_spec else (wip.thickness if wip else 0.0)),
+                width=(production_plan_spec.width if production_plan_spec else (wip.width if wip else 0.0)),
+                length=(production_plan_spec.length if production_plan_spec else (wip.length if wip else 0.0)),
                 weight=wip.weight if wip else 0.0,
                 fromLocation=from_loc.loc_name if from_loc else None,
                 toLocation=to_loc.loc_name if to_loc else None,
                 expectedStartTime=item.expected_start_time
             ))
 
-    # 더미 계산: 재배치 후 피킹 크레인 교체 이동 횟수 (단순화: 총 이동 횟수 * 1.5 등 로직에 맞게 조정 가능)
-    total_crane_move = total_move_num + total_wip_num 
+            if item.steel_wip_id:
+                wip_detail_map[item.steel_wip_id] = {
+                    "qrCode": qr_code.qr_code if qr_code and qr_code.qr_code else None,
+                    "thickness": production_plan_spec.thickness if production_plan_spec else (wip.thickness if wip else None),
+                    "width": production_plan_spec.width if production_plan_spec else (wip.width if wip else None),
+                    "length": production_plan_spec.length if production_plan_spec else (wip.length if wip else None),
+                }
+
+    if matches_demo_solver_result(items_result, cuttings):
+        for steel_wip_id, detail in {
+            spec.steel_wip_id: spec for spec in production_plan_specs.values()
+        }.items():
+            existing = wip_detail_map.get(steel_wip_id, {})
+            if not existing.get("qrCode"):
+                wip = await db.get(SteelWip, steel_wip_id)
+                qr_code = await db.get(QrCodes, wip.qr_id) if wip and wip.qr_id else None
+                existing["qrCode"] = qr_code.qr_code if qr_code and qr_code.qr_code else None
+            existing["thickness"] = detail.thickness
+            existing["width"] = detail.width
+            existing["length"] = detail.length
+            wip_detail_map[steel_wip_id] = existing
+
+    solver_summary = None
+    job_schedule: list[ScenarioJobScheduleItem] = []
+    crane_schedule: list[ScenarioCraneScheduleItem] = []
+    total_crane_move = total_move_num + total_wip_num
+
+    is_demo_solver_result = matches_demo_solver_result(items_result, cuttings)
+
+    if is_demo_solver_result:
+        solver_summary = ScenarioSolverSummary(
+            status=DEMO_SOLVER_SUMMARY["status"],
+            objective=DEMO_SOLVER_SUMMARY["objective"],
+            mipGap=DEMO_SOLVER_SUMMARY["mipGap"],
+            solutions=DEMO_SOLVER_SUMMARY["solutions"],
+            solveSeconds=DEMO_SOLVER_SUMMARY["solveSeconds"],
+            makespanMinutes=DEMO_SOLVER_SUMMARY["makespanMinutes"],
+        )
+        job_schedule = [
+            ScenarioJobScheduleItem(
+                jobName=job.job_name,
+                sequence=job.sequence,
+                startMinute=job.start_minute,
+                endMinute=job.end_minute,
+                pickWips=job.pick_wips,
+                outputWips=job.output_wips,
+            )
+            for job in DEMO_JOB_SCHEDULE
+        ]
+        crane_schedule = [
+            ScenarioCraneScheduleItem(
+                order=row.order,
+                action=row.action,
+                steelWipId=row.steel_wip_id,
+                qrCode=(wip_detail_map.get(row.steel_wip_id) or {}).get("qrCode"),
+                thickness=(wip_detail_map.get(row.steel_wip_id) or {}).get("thickness"),
+                width=(wip_detail_map.get(row.steel_wip_id) or {}).get("width"),
+                length=(wip_detail_map.get(row.steel_wip_id) or {}).get("length"),
+                fromLocation=row.from_location,
+                toLocation=row.to_location,
+                eventMinute=row.event_minute,
+                moveType=row.move_type,
+            )
+            for row in DEMO_CRANE_SCHEDULE
+        ]
+        total_wip_num = sum(len(job.output_wips) for job in DEMO_JOB_SCHEDULE)
+        total_crane_move = len(DEMO_CRANE_SCHEDULE)
+        total_move_num = DEMO_SOLVER_SUMMARY["objective"]
+        total_cutting_time = round(DEMO_SOLVER_SUMMARY["makespanMinutes"])
 
     result_data = ScenarioResultData(
         projectId=project.id,
@@ -157,7 +252,10 @@ async def get_scenario_result(db: AsyncSession, scenario_id: int) -> list:
         totalWipNum=total_wip_num,
         totalCraneMove=total_crane_move,
         totalMoveNum=total_move_num,
-        batchItems=batch_items
+        batchItems=batch_items,
+        solverSummary=solver_summary,
+        jobSchedule=job_schedule,
+        craneSchedule=crane_schedule,
     )
     
     return [result_data]
@@ -206,12 +304,10 @@ async def get_scenario_history(
     """GET: 시나리오 생성 이력 다중 필터링 및 통계 조회 (DRAFT 상태만)"""
     
     # 1. 기본 조인 쿼리 (Scenarios + Projects)
-    # 여기에 Scenarios.status == "DRAFT" 조건을 기본으로 추가합니다.
-    # DRAFT 또는 NULL(이전 버전 호환) 시나리오만 조회
     stmt = (
         select(Scenarios, Projects)
         .join(Projects, Scenarios.project_id == Projects.id)
-        .where(or_(Scenarios.status == "DRAFT", Scenarios.status.is_(None)))
+        .where(Scenarios.status == "DRAFT")
     )
     
     # 2. 동적 필터링 적용 (이하 로직은 기존과 완전히 동일합니다)
@@ -337,6 +433,8 @@ async def send_scenario_to_field(db: AsyncSession, scenario_id: int):
 
     db.add(scenario)
     
+    await ensure_scenario_execution_plan(db, scenario_id, replace_existing=False)
+
     # 4. Batch 조회
     batch_stmt = select(Batch.id).where(Batch.scenario_id == scenario_id)
     batches = (await db.execute(batch_stmt)).scalars().all()

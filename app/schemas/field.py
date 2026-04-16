@@ -67,6 +67,11 @@ class FieldWipDetail(BaseModel):
     weight: str
 
 class FieldBatchItem(BaseModel):
+    scenarioId: Optional[int] = None
+    scenarioTitle: Optional[str] = None
+    lazerName: Optional[str] = None
+    batchId: Optional[int] = None
+    batchOrder: Optional[int] = None
     batchItemId: str
     status: str
     batchItemAction: str
@@ -102,6 +107,12 @@ class ProgressLazerCutting(BaseModel):
 
 class FieldProgressData(BaseModel):
     """생산 중 화면 응답 — 현재 배치의 절단 작업 전체"""
+    scenarioId: int
+    scenarioTitle: str
+    batchProgressRate: float = 0.0
+    completedTaskCount: int = 0
+    totalTaskCount: int = 0
+    remainingTaskCount: int = 0
     expectedTotalRunningTime: int          # 모든 lazer_cutting.estimated_cutting_time 합산 (분)
     lazer_cutting: List[ProgressLazerCutting]
 
@@ -122,6 +133,8 @@ class FieldReadyData(BaseModel):
     completedTaskCount: int = 0
     totalTaskCount: int = 0
     remainingTaskCount: int = 0
+    currentBatchRemainingTaskCount: int = 0
+    currentBatchPendingInboundCount: int = 0
     batch: List[FieldBatchGroup]         # 전체 Batch 목록 (RELOCATE / PICKING 분리)
     nextScenarioId: Optional[int] = None
     nextScenarioTitle: Optional[str] = None
@@ -180,3 +193,11 @@ class QrSaveRequest(BaseModel):
     """
     wipQR: Optional[str] = None
     locQR: Optional[str] = None
+
+
+class QrSaveResult(BaseModel):
+    batchItemId: int
+    action: str
+    currentBatchRemainingTaskCount: int = 0
+    currentBatchPendingInboundCount: int = 0
+    shouldMoveToReady: bool = False
