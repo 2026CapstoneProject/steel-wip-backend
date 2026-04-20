@@ -17,9 +17,22 @@ capstoneDB-backup 폴더의 MySQL dump 파일을 SQLite 테스트 DB에 로드�
 
 import re
 import pathlib
+from datetime import date, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import text
+from sqlalchemy import text, select, func
+
+from app.models import (
+    Locations,
+    Projects,
+    QrCodes,
+    SteelWip,
+    Scenarios,
+    Batch,
+    BatchItems,
+    LazerCutting,
+    EstimatedWips,
+)
 
 # capstoneDB-backup 폴더 경로 (steel-wip-backend 기준 상위)
 DUMP_DIR = (
@@ -41,6 +54,237 @@ LOAD_ORDER = [
     ("capstone2026_steel_wip_history.sql", "steel_wip_history"),
     # trigger 파일은 SQLite에서 지원하지 않으므로 제외
 ]
+
+
+async def _load_embedded_field_fixtures(session: AsyncSession) -> None:
+    """
+    capstoneDB-backup 폴더가 없는 개발 환경에서도
+    field 통합 테스트가 기대하는 최소 실데이터 셋을 구성한다.
+    """
+    location_rows = [
+        (1, "A-1"), (2, "A-2"), (3, "A-3"), (4, "A-4"),
+        (5, "B-1"), (6, "B-2"), (7, "B-3"), (8, "C-1"), (9, "C-2"),
+        (15, "S4-1"), (16, "S4-2"), (17, "S4-3"), (18, "S4-4"), (23, "ETC"),
+    ]
+    session.add_all(
+        Locations(id=loc_id, loc_name=name, loc_can_stock=1, loc_stack_height=10)
+        for loc_id, name in location_rows
+    )
+
+    session.add_all([
+        Projects(id=1, title="포스코 건설(80톤)", project_due=date(2026, 4, 30)),
+        Projects(id=2, title="토네이도 건설(12톤)", project_due=date(2026, 5, 10)),
+    ])
+
+    session.add_all([
+        Scenarios(
+            id=1,
+            title="포스코 건설(80톤)-1",
+            status="ORDERED",
+            scenario_due=date(2026, 4, 20),
+            scenario_order=1,
+            created_at=datetime(2026, 4, 5, 9, 0, 0),
+            lazer_name="LAZER1",
+            project_id=1,
+            emergency_or_not=0,
+        ),
+        Scenarios(
+            id=2,
+            title="토네이도 건설(12톤)-1",
+            status="ORDERED",
+            scenario_due=date(2026, 4, 25),
+            scenario_order=2,
+            created_at=datetime(2026, 4, 5, 10, 0, 0),
+            lazer_name="LAZER1",
+            project_id=2,
+            emergency_or_not=0,
+        ),
+    ])
+
+    session.add_all([
+        Batch(id=1, scenario_id=1, batch_order=1),
+        Batch(id=2, scenario_id=1, batch_order=2),
+        Batch(id=3, scenario_id=1, batch_order=3),
+        Batch(id=4, scenario_id=2, batch_order=1),
+        Batch(id=5, scenario_id=2, batch_order=2),
+        Batch(id=6, scenario_id=2, batch_order=3),
+    ])
+
+    session.add_all(QrCodes(id=qr_id, qr_code=f"QR-{qr_id}") for qr_id in range(103, 109))
+
+    def build_wip(
+        wip_id: int,
+        location_id: int | None = 1,
+        qr_id: int | None = None,
+        thickness: float = 20.0,
+        width: float = 2438.0,
+        length: float = 6096.0,
+        material: str = "SM355A",
+        status: str = "IN_STOCK",
+    ) -> SteelWip:
+        return SteelWip(
+            id=wip_id,
+            status=status,
+            material=material,
+            thickness=thickness,
+            width=width,
+            length=length,
+            weight=100.0,
+            manufacturer="POSCO",
+            location_id=location_id,
+            stack_level=1,
+            qr_id=qr_id,
+        )
+
+    core_wips = [
+        build_wip(1, 1),
+        build_wip(4, 2),
+        build_wip(39, 3),
+        build_wip(42, 3, material="GS400"),
+        build_wip(103, None, 103, 16.0, 1446.4, 1511.0, status="REGISTERED"),
+        build_wip(104, None, 104, 12.0, 1200.0, 2200.0, status="REGISTERED"),
+        build_wip(105, None, 105, 14.0, 1800.0, 3000.0, status="REGISTERED"),
+        build_wip(106, None, 106, 10.0, 900.0, 2100.0, status="REGISTERED"),
+        build_wip(107, None, 107, 8.0, 800.0, 1600.0, status="REGISTERED"),
+        build_wip(108, None, 108, 6.0, 700.0, 1400.0, status="REGISTERED"),
+    ]
+    filler_ids = list(range(200, 343))
+    core_wips.extend(build_wip(wip_id, (wip_id % 9) + 1) for wip_id in filler_ids)
+    session.add_all(core_wips)
+
+    def add_item(
+        item_id: int,
+        batch_id: int,
+        order: int,
+        action: str,
+        from_location: int | None,
+        to_location: int | None,
+        steel_wip_id: int | None = None,
+    ) -> BatchItems:
+        return BatchItems(
+            id=item_id,
+            batch_id=batch_id,
+            steel_wip_id=steel_wip_id,
+            batch_item_action=action,
+            status="PENDING",
+            batch_item_order=order,
+            from_location=from_location,
+            to_location=to_location,
+            expected_start_time=(order - 1) * 5,
+            expected_running_time=5,
+        )
+
+    items: list[BatchItems] = []
+
+    batch1_plan = {
+        3: ("PICKING", 3, 15, 42),
+        7: ("PICKING", 5, 16, 200),
+        8: ("INBOUND", None, 8, 103),
+        9: ("INBOUND", None, 1, 104),
+        10: ("INBOUND", None, 4, 105),
+        11: ("INBOUND", None, 7, 106),
+        18: ("PICKING", 6, 17, 201),
+        26: ("INBOUND", None, 8, 107),
+        27: ("INBOUND", None, 3, 108),
+        28: ("PICKING", 7, 18, 202),
+    }
+    relocate_wips = iter(range(203, 223))
+    for item_id in range(1, 31):
+        if item_id in batch1_plan:
+            action, from_loc, to_loc, wip_id = batch1_plan[item_id]
+        else:
+            action, from_loc, to_loc, wip_id = (
+                "RELOCATE",
+                ((item_id - 1) % 8) + 1,
+                ((item_id + 2) % 8) + 1,
+                next(relocate_wips),
+            )
+        items.append(add_item(item_id, 1, item_id, action, from_loc, to_loc, wip_id))
+
+    batch2_plan = {
+        31: ("RELOCATE", 1, 8, 223),
+        32: ("RELOCATE", 2, 9, 224),
+        33: ("PICKING", 6, 15, 225),
+        34: ("PICKING", 5, 16, 226),
+        35: ("PICKING", 7, 17, 227),
+        36: ("PICKING", 3, 18, 228),
+        37: ("INBOUND", None, 1, 229),
+        38: ("INBOUND", None, 4, 230),
+        39: ("INBOUND", None, 7, 231),
+        40: ("INBOUND", None, 8, 232),
+        41: ("INBOUND", None, 9, 233),
+    }
+    relocate_wips = iter(range(234, 242))
+    for item_id in range(31, 50):
+        if item_id in batch2_plan:
+            action, from_loc, to_loc, wip_id = batch2_plan[item_id]
+        else:
+            action, from_loc, to_loc, wip_id = (
+                "RELOCATE",
+                ((item_id - 30) % 7) + 1,
+                ((item_id - 27) % 7) + 1,
+                next(relocate_wips),
+            )
+        items.append(add_item(item_id, 2, item_id - 30, action, from_loc, to_loc, wip_id))
+
+    batch3_plan = {
+        63: ("PICKING", 1, 15, 242),
+        64: ("PICKING", 2, 16, 243),
+        65: ("PICKING", 3, 17, 244),
+        66: ("PICKING", 4, 18, 245),
+        67: ("INBOUND", None, 1, 246),
+        68: ("INBOUND", None, 5, 247),
+        69: ("INBOUND", None, 8, 248),
+    }
+    relocate_wips = iter(range(249, 262))
+    for item_id in range(50, 70):
+        if item_id in batch3_plan:
+            action, from_loc, to_loc, wip_id = batch3_plan[item_id]
+        else:
+            action, from_loc, to_loc, wip_id = (
+                "RELOCATE",
+                ((item_id - 48) % 8) + 1,
+                ((item_id - 45) % 8) + 1,
+                next(relocate_wips),
+            )
+        items.append(add_item(item_id, 3, item_id - 49, action, from_loc, to_loc, wip_id))
+
+    scenario2_specs = [(4, 70, 36), (5, 106, 30), (6, 136, 15)]
+    filler_wips = iter(range(262, 343))
+    for batch_id, start_id, count in scenario2_specs:
+        for index in range(count):
+            item_id = start_id + index
+            items.append(
+                add_item(
+                    item_id,
+                    batch_id,
+                    index + 1,
+                    "RELOCATE",
+                    (index % 8) + 1,
+                    ((index + 3) % 8) + 1,
+                    next(filler_wips),
+                )
+            )
+
+    session.add_all(items)
+
+    session.add_all([
+        LazerCutting(id=1, batch_id=1, scenario_id=1, steel_wip_id=42, estimated_cutting_time=23, status="PENDING"),
+        LazerCutting(id=2, batch_id=1, scenario_id=1, steel_wip_id=1, estimated_cutting_time=93, status="PENDING"),
+        LazerCutting(id=3, batch_id=1, scenario_id=1, steel_wip_id=4, estimated_cutting_time=32, status="PENDING"),
+        LazerCutting(id=4, batch_id=1, scenario_id=1, steel_wip_id=39, estimated_cutting_time=43, status="PENDING"),
+    ])
+
+    session.add_all([
+        EstimatedWips(id=1, lazer_cutting_id=1, qr_id=103, material="SM355A", thickness=16.0, width=1446.4, length=1511.0),
+        EstimatedWips(id=2, lazer_cutting_id=1, qr_id=104, material="SM355A", thickness=12.0, width=1200.0, length=2200.0),
+        EstimatedWips(id=3, lazer_cutting_id=2, qr_id=105, material="SM355A", thickness=14.0, width=1800.0, length=3000.0),
+        EstimatedWips(id=4, lazer_cutting_id=2, qr_id=106, material="SM355A", thickness=10.0, width=900.0, length=2100.0),
+        EstimatedWips(id=5, lazer_cutting_id=3, qr_id=107, material="SM355A", thickness=8.0, width=800.0, length=1600.0),
+        EstimatedWips(id=6, lazer_cutting_id=3, qr_id=108, material="SM355A", thickness=6.0, width=700.0, length=1400.0),
+    ])
+
+    await session.commit()
 
 
 # ── 파싱 헬퍼 ─────────────────────────────────────────────────────────
@@ -183,3 +427,7 @@ async def load_dump_fixtures(session: AsyncSession) -> None:
                 pass
 
     await session.commit()
+
+    scenario_count = (await session.execute(select(func.count(Scenarios.id)))).scalar() or 0
+    if scenario_count == 0:
+        await _load_embedded_field_fixtures(session)

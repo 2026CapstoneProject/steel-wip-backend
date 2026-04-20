@@ -16,6 +16,7 @@
 import pytest
 from datetime import date, datetime
 from httpx import AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
@@ -558,6 +559,61 @@ async def test_send_scenario_no_batch_items(client: AsyncClient, db_session: Asy
     assert response.status_code == 200
     await db_session.refresh(scenario)
     assert scenario.status == "ORDERED"
+
+
+@pytest.mark.asyncio
+async def test_send_scenario_generates_plan_from_lantek_when_missing(
+    client: AsyncClient, db_session: AsyncSession
+):
+    """
+    solver가 아직 돌지 않았더라도 LANTEK cuttings가 있으면
+    발행 시 임시 batch / batch_items가 자동 생성되어 field에서 볼 수 있어야 한다.
+    """
+    project = await make_project(db_session)
+    scenario = await make_scenario(db_session, project.id, status="DRAFT")
+    loc_a = await make_location(db_session, "A-1")
+    source_wip = await make_wip(db_session, status="IN_STOCK", location_id=loc_a.id)
+
+    lc = LazerCutting(
+        scenario_id=scenario.id,
+        steel_wip_id=source_wip.id,
+        estimated_cutting_time=45,
+        status="PENDING",
+        priority="LOW",
+    )
+    db_session.add(lc)
+    await db_session.flush()
+
+    qr = QrCodes(qr_code="QR-AUTO-PLAN")
+    db_session.add(qr)
+    await db_session.flush()
+
+    ew = EstimatedWips(
+        lazer_cutting_id=lc.id,
+        qr_id=qr.id,
+        manufacturer="POSCO",
+        material="SM355A",
+        thickness=source_wip.thickness,
+        width=800.0,
+        length=1200.0,
+        weight=75.4,
+    )
+    db_session.add(ew)
+    await db_session.commit()
+
+    response = await client.post(f"/api/scenario_send/{scenario.id}")
+
+    assert response.status_code == 200
+    batches = (await db_session.execute(select(Batch).where(Batch.scenario_id == scenario.id))).scalars().all()
+    assert len(batches) == 1
+    items = (
+        await db_session.execute(
+            select(BatchItems).join(Batch, BatchItems.batch_id == Batch.id).where(Batch.scenario_id == scenario.id)
+        )
+    ).scalars().all()
+    actions = {item.batch_item_action for item in items}
+    assert "PICKING" in actions
+    assert "INBOUND" in actions
 
 
 @pytest.mark.asyncio

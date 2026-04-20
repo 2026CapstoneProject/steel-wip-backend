@@ -29,8 +29,13 @@ async def import_lantek_pdf(
     db: AsyncSession = Depends(get_db)
 ):
     try:
-        # 새 시나리오 생성 및 더미 데이터 저장 서비스 호출
-        await lantek_service.create_dummy_lantek_data(db, scenario_id)
+        file_bytes = await file.read()
+        await lantek_service.create_dummy_lantek_data(
+            db,
+            scenario_id,
+            file_bytes=file_bytes,
+            filename=file.filename,
+        )
         
         # 처리 완료 후, 방금 생성된 시나리오 ID를 기준으로 데이터를 다시 조회하여 반환
         data = await lantek_service.get_lantek_data(db, scenario_id)

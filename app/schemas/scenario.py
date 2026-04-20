@@ -43,6 +43,7 @@ class ScenarioCreateRequest(BaseModel):
 class BatchItemDetail(BaseModel):
     batchItemAction: str
     steelWipId: int
+    qrCode: Optional[str] = None
     manufacturer: str
     material: str
     thickness: float
@@ -52,6 +53,35 @@ class BatchItemDetail(BaseModel):
     fromLocation: Optional[str] = None
     toLocation: Optional[str] = None
     expectedStartTime: int
+
+class ScenarioSolverSummary(BaseModel):
+    status: str
+    objective: int
+    mipGap: float
+    solutions: int
+    solveSeconds: float
+    makespanMinutes: float
+
+class ScenarioJobScheduleItem(BaseModel):
+    jobName: str
+    sequence: int
+    startMinute: float
+    endMinute: float
+    pickWips: List[int]
+    outputWips: List[int]
+
+class ScenarioCraneScheduleItem(BaseModel):
+    order: int
+    action: str
+    steelWipId: int
+    qrCode: Optional[str] = None
+    thickness: Optional[float] = None
+    width: Optional[float] = None
+    length: Optional[float] = None
+    fromLocation: str
+    toLocation: str
+    eventMinute: float
+    moveType: Optional[str] = None
 
 class ScenarioResultData(BaseModel):
     projectId: int
@@ -65,6 +95,9 @@ class ScenarioResultData(BaseModel):
     totalCraneMove: int
     totalMoveNum: int
     batchItems: List[BatchItemDetail]
+    solverSummary: Optional[ScenarioSolverSummary] = None
+    jobSchedule: List[ScenarioJobScheduleItem] = Field(default_factory=list)
+    craneSchedule: List[ScenarioCraneScheduleItem] = Field(default_factory=list)
 
 # app/schemas/scenario.py (기존 내용 하단에 추가)
 

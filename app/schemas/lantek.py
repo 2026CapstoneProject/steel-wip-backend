@@ -12,13 +12,18 @@ class LantekInput(BaseModel):
 
 class LantekEstimatedWip(BaseModel):
     id: int
+    plannedWipId: Optional[int] = None
+    jobName: Optional[str] = None
     thickness: float
     width: float
     height: float
     weight: Optional[float] = None   # estimated_wips.weight (절단 후 무게 kg)
+    memo: Optional[str] = None
 
 class LantekCutting(BaseModel):
     id: int
+    jobName: Optional[str] = None
+    plannedSourceWipId: Optional[int] = None
     estimatedCuttingTime: str
     input: LantekInput
     estimatedWips: List[LantekEstimatedWip]

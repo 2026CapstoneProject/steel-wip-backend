@@ -17,6 +17,7 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
+from app.services import lantek_service
 from app.models import (
     Projects, Scenarios, Batch, BatchItems, SteelWip,
     LazerCutting, EstimatedWips, QrCodes, Locations
@@ -114,6 +115,48 @@ async def make_estimated_wip(
     db.add(ew)
     await db.flush()
     return ew
+
+
+def test_parse_layouts_supports_demo_english_template():
+    text = """
+REPORT PAGE 1
+PART SUMMARY
+JOB NAME : Job2
+SOURCE WIP ID : 28
+OUTPUT WIP ID : 103
+OUTPUT SIZE : 950.00mm*1690.00mm
+SLAB SIZE : 420.00mm*1500.00mm
+PLATE SIZE : 1200.00mm*2500.00mm
+CUTTING TIME HOURS : 0.75
+THICKNESS : 12.00mm
+MATERIAL : GS400
+LAYOUT 1-1/2
+
+REPORT PAGE 2
+PART SUMMARY
+SLAB SIZE : 1190.00mm*570.00mm
+PLATE SIZE : 1200.00mm*2500.00mm
+CUTTING TIME HOURS : 0.07
+THICKNESS : 20.00mm
+MATERIAL : SS275
+LAYOUT 2-2/2
+"""
+
+    layouts = lantek_service._parse_layouts_from_text(text)
+
+    assert len(layouts) == 2
+    assert layouts[0].layout_name == "1-1/2"
+    assert layouts[0].material == "GS400"
+    assert layouts[0].thickness == 12.0
+    assert layouts[0].slab_width == 420.0
+    assert layouts[0].job_name == "Job2"
+    assert layouts[0].planned_source_wip_id == 28
+    assert layouts[0].planned_output_wip_id == 103
+    assert layouts[0].output_width == 950.0
+    assert layouts[0].output_length == 1690.0
+    assert layouts[1].layout_name == "2-2/2"
+    assert layouts[1].material == "SS275"
+    assert layouts[1].thickness == 20.0
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -247,6 +290,17 @@ async def test_import_lantek_success(client: AsyncClient, db_session: AsyncSessi
     lc_list = lc_count_result.scalars().all()
     assert len(lc_list) == 12
 
+    batch_list = (
+        await db_session.execute(select(Batch).where(Batch.scenario_id == scenario.id))
+    ).scalars().all()
+    batch_item_list = (
+        await db_session.execute(
+            select(BatchItems).join(Batch, BatchItems.batch_id == Batch.id).where(Batch.scenario_id == scenario.id)
+        )
+    ).scalars().all()
+    assert len(batch_list) == 3
+    assert len(batch_item_list) > 0
+
 
 @pytest.mark.asyncio
 async def test_import_lantek_no_stock(client: AsyncClient, db_session: AsyncSession):
@@ -295,6 +349,231 @@ async def test_import_lantek_returns_scenario_data(client: AsyncClient, db_sessi
     assert data["projectTitle"] == "import 검증 프로젝트"
     # LazerCutting 12개
     assert len(data["lazerCutting"]) == 12
+
+
+@pytest.mark.asyncio
+async def test_import_lantek_parses_pdf_layouts(monkeypatch, client: AsyncClient, db_session: AsyncSession):
+    """
+    PDF에서 레이아웃 2개가 파싱되면 실제 절단 지시 2개와 예상 잔재 2개가 생성된다.
+    각 레이아웃은 재질/두께가 맞는 IN_STOCK WIP에 연결된다.
+    """
+    project = await make_project(db_session, title="파싱 프로젝트")
+    scenario = await make_scenario(db_session, project.id, status=None)
+    wip1 = await make_wip_in_stock(db_session, material="SM355A")
+    wip2 = await make_wip_in_stock(db_session, material="SM355A")
+    wip1.thickness = 12.0
+    wip2.thickness = 12.0
+    await db_session.commit()
+
+    sample_text = """
+부품 정보 요약 총 종 개 부품 : 12 62
+슬랩 사이즈 : 2421.90mm*6079.10mm
+판재 크기 : 2438.00mm*6096.00mm
+단일 가공 시간 시간 : 0.94가공 횟수 : 1판재 두께 : 12.00mm판재 재질 : SM355A
+레이아웃 1-1/5
+부품 정보 요약 총 종 개 부품 : 7 64
+슬랩 사이즈 : 2198.62mm*1251.10mm
+판재 크기 : 2438.00mm*6096.00mm
+단일 가공 시간 시간 : 0.13가공 횟수 : 1판재 두께 : 12.00mm판재 재질 : SM355A
+레이아웃 5-5/5
+"""
+    monkeypatch.setattr(lantek_service, "_extract_pdf_text", lambda file_bytes: sample_text)
+
+    response = await client.post(
+        "/api/lantek/import",
+        data={"scenario_id": scenario.id},
+        files={"file": ("parsed.pdf", b"%PDF-test", "application/pdf")},
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"][0]
+    assert len(data["lazerCutting"]) == 2
+    assert data["lazerCutting"][0]["estimatedCuttingTime"] == "00:56"
+    assert data["lazerCutting"][1]["estimatedWips"][0]["width"] == 2198.62
+    assert data["lazerCutting"][1]["estimatedWips"][0]["height"] == 1251.1
+
+    cuttings = (
+        await db_session.execute(select(LazerCutting).where(LazerCutting.scenario_id == scenario.id))
+    ).scalars().all()
+    assert len(cuttings) == 2
+    assert {cut.steel_wip_id for cut in cuttings} == {wip1.id, wip2.id}
+
+
+@pytest.mark.asyncio
+async def test_import_lantek_parsed_scrap_weight(monkeypatch, client: AsyncClient, db_session: AsyncSession):
+    """
+    PDF 파싱 경로에서는 슬랩 사이즈를 예상 잔재로 저장하고 무게도 계산한다.
+    """
+    project = await make_project(db_session)
+    scenario = await make_scenario(db_session, project.id, status=None)
+    source_wip = await make_wip_in_stock(db_session, material="SM355A")
+    source_wip.thickness = 12.0
+    await db_session.commit()
+
+    sample_text = """
+부품 정보 요약
+슬랩 사이즈 : 1000.00mm*2000.00mm
+판재 크기 : 2438.00mm*6096.00mm
+단일 가공 시간 시간 : 1.00가공 횟수 : 1판재 두께 : 12.00mm판재 재질 : SM355A
+레이아웃 1-1/1
+"""
+    monkeypatch.setattr(lantek_service, "_extract_pdf_text", lambda file_bytes: sample_text)
+
+    response = await client.post(
+        "/api/lantek/import",
+        data={"scenario_id": scenario.id},
+        files={"file": ("parsed.pdf", b"%PDF-test", "application/pdf")},
+    )
+
+    assert response.status_code == 200
+    estimated = response.json()["data"][0]["lazerCutting"][0]["estimatedWips"][0]
+    assert estimated["weight"] == 188.4
+
+
+@pytest.mark.asyncio
+async def test_import_lantek_demo_jobs_show_planned_wip_info(monkeypatch, client: AsyncClient, db_session: AsyncSession):
+    project = await make_project(db_session, title="데모 작업지시서 프로젝트")
+    scenario = await make_scenario(db_session, project.id, status=None)
+
+    for material, thickness in [("SM355A", 12.0), ("SM355A", 12.0), ("SS275", 20.0)]:
+        wip = await make_wip_in_stock(db_session, material=material)
+        wip.thickness = thickness
+    await db_session.commit()
+
+    sample_text = """
+PART SUMMARY
+JOB NAME : Job1
+SOURCE WIP ID : 0
+OUTPUT WIP ID : 0
+SLAB SIZE : 2438.00mm*6096.00mm
+PLATE SIZE : 2438.00mm*6096.00mm
+CUTTING TIME HOURS : 4.01
+THICKNESS : 12.00mm
+MATERIAL : SM355A
+LAYOUT 1-1/3
+PART SUMMARY
+JOB NAME : Job2
+SOURCE WIP ID : 28
+OUTPUT WIP ID : 103
+OUTPUT SIZE : 950.00mm*1690.00mm
+SLAB SIZE : 950.00mm*1690.00mm
+PLATE SIZE : 950.00mm*2530.00mm
+CUTTING TIME HOURS : 0.16
+THICKNESS : 12.00mm
+MATERIAL : SM355A
+LAYOUT 2-2/3
+PART SUMMARY
+JOB NAME : Job3
+SOURCE WIP ID : 99
+OUTPUT WIP ID : 104
+OUTPUT SIZE : 1190.00mm*570.00mm
+SLAB SIZE : 1190.00mm*570.00mm
+PLATE SIZE : 570.00mm*2450.00mm
+CUTTING TIME HOURS : 0.07
+THICKNESS : 20.00mm
+MATERIAL : SS275
+LAYOUT 3-3/3
+"""
+    monkeypatch.setattr(lantek_service, "_extract_pdf_text", lambda file_bytes: sample_text)
+
+    response = await client.post(
+        "/api/lantek/import",
+        data={"scenario_id": scenario.id},
+        files={"file": ("demo.pdf", b"%PDF-demo", "application/pdf")},
+    )
+
+    assert response.status_code == 200
+    cuttings = response.json()["data"][0]["lazerCutting"]
+    assert len(cuttings) == 3
+    assert cuttings[0]["jobName"] == "Job1"
+    assert cuttings[0]["plannedSourceWipId"] == 0
+    assert cuttings[0]["estimatedWips"] == []
+    assert cuttings[1]["jobName"] == "Job2"
+    assert cuttings[1]["plannedSourceWipId"] == 28
+    assert cuttings[1]["estimatedWips"][0]["plannedWipId"] == 103
+    assert cuttings[1]["estimatedWips"][0]["width"] == 950.0
+    assert cuttings[1]["estimatedWips"][0]["height"] == 1690.0
+    assert cuttings[2]["jobName"] == "Job3"
+    assert cuttings[2]["plannedSourceWipId"] == 99
+    assert cuttings[2]["estimatedWips"][0]["plannedWipId"] == 104
+
+
+@pytest.mark.asyncio
+async def test_import_lantek_parsed_layouts_can_reuse_stock_when_insufficient(
+    monkeypatch, client: AsyncClient, db_session: AsyncSession
+):
+    """
+    PDF 레이아웃 수가 실제 IN_STOCK 수보다 많아도
+    임시 시나리오 생성 목적이라면 같은 원판을 재사용해 import가 완료되어야 한다.
+    """
+    project = await make_project(db_session)
+    scenario = await make_scenario(db_session, project.id, status=None)
+    source_wip = await make_wip_in_stock(db_session, material="SM355A")
+    source_wip.thickness = 12.0
+    await db_session.commit()
+
+    sample_text = """
+부품 정보 요약
+슬랩 사이즈 : 1000.00mm*2000.00mm
+판재 크기 : 2438.00mm*6096.00mm
+단일 가공 시간 시간 : 1.00가공 횟수 : 1판재 두께 : 12.00mm판재 재질 : SM355A
+레이아웃 1-1/2
+부품 정보 요약
+슬랩 사이즈 : 800.00mm*1200.00mm
+판재 크기 : 2438.00mm*6096.00mm
+단일 가공 시간 시간 : 0.50가공 횟수 : 1판재 두께 : 12.00mm판재 재질 : SM355A
+레이아웃 2-2/2
+"""
+    monkeypatch.setattr(lantek_service, "_extract_pdf_text", lambda file_bytes: sample_text)
+
+    response = await client.post(
+        "/api/lantek/import",
+        data={"scenario_id": scenario.id},
+        files={"file": ("parsed.pdf", b"%PDF-test", "application/pdf")},
+    )
+
+    assert response.status_code == 200
+    cuttings = response.json()["data"][0]["lazerCutting"]
+    assert len(cuttings) == 2
+    assert cuttings[0]["input"]["material"] == "SM355A"
+    assert cuttings[1]["input"]["material"] == "SM355A"
+
+
+@pytest.mark.asyncio
+async def test_import_lantek_populates_scenario_result_batch_items(
+    monkeypatch, client: AsyncClient, db_session: AsyncSession
+):
+    """
+    import 직후 /api/scenario/{id}에서도 batchItems가 보여야 한다.
+    solver를 따로 돌리지 않아도 office result/history 화면이 비지 않도록 보장한다.
+    """
+    project = await make_project(db_session)
+    scenario = await make_scenario(db_session, project.id, status=None)
+    source_wip = await make_wip_in_stock(db_session, material="SM355A")
+    source_wip.thickness = 12.0
+    source_wip.location_id = 1
+    await db_session.commit()
+
+    sample_text = """
+부품 정보 요약
+슬랩 사이즈 : 800.00mm*1200.00mm
+판재 크기 : 2438.00mm*6096.00mm
+단일 가공 시간 시간 : 0.50가공 횟수 : 1판재 두께 : 12.00mm판재 재질 : SM355A
+레이아웃 1-1/1
+"""
+    monkeypatch.setattr(lantek_service, "_extract_pdf_text", lambda file_bytes: sample_text)
+
+    response = await client.post(
+        "/api/lantek/import",
+        data={"scenario_id": scenario.id},
+        files={"file": ("parsed.pdf", b"%PDF-test", "application/pdf")},
+    )
+    assert response.status_code == 200
+
+    scenario_response = await client.get(f"/api/scenario/{scenario.id}")
+    assert scenario_response.status_code == 200
+    batch_items = scenario_response.json()["data"][0]["batchItems"]
+    assert len(batch_items) >= 2
 
 
 # ══════════════════════════════════════════════════════════════════════

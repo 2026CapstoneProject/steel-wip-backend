@@ -36,10 +36,24 @@ class PickingBatchItem(BaseModel):
     height: Optional[float] = None  # DB의 length 컬럼에 대응
 
 
+class InboundBatchItem(BaseModel):
+    """적재(INBOUND) 작업 아이템"""
+    batchItemId: int
+    wipId: int
+    material: str
+    fromLocationName: Optional[str] = None
+    toLocationName: Optional[str] = None
+    expectedRunningTime: int = 0
+    thickness: Optional[float] = None
+    width: Optional[float] = None
+    height: Optional[float] = None  # DB의 length 컬럼에 대응
+
+
 class FieldBatchGroup(BaseModel):
-    """배치 한 묶음 — 재배치 목록 + 피킹 목록"""
+    """배치 한 묶음 — 재배치 목록 + 피킹 목록 + 적재 목록"""
     relocation: List[RelocationBatchItem]
     picking: List[PickingBatchItem]
+    inbound: List[InboundBatchItem]
 
 
 # ─────────────────────────────────────────────
@@ -51,6 +65,9 @@ class FieldEndData(BaseModel):
     scenarioId: int
     scenarioTitle: str
     scenarioProgressRate: float   # 0.0 ~ 1.0 (완료 batch_item / 전체 batch_item)
+    completedTaskCount: int = 0
+    totalTaskCount: int = 0
+    remainingTaskCount: int = 0
     batch: List[FieldBatchGroup]  # 완료된 Batch만
 
 
@@ -64,6 +81,11 @@ class FieldWipDetail(BaseModel):
     weight: str
 
 class FieldBatchItem(BaseModel):
+    scenarioId: Optional[int] = None
+    scenarioTitle: Optional[str] = None
+    lazerName: Optional[str] = None
+    batchId: Optional[int] = None
+    batchOrder: Optional[int] = None
     batchItemId: str
     status: str
     batchItemAction: str
@@ -81,6 +103,7 @@ class FieldBatchItem(BaseModel):
 class ProgressWipItem(BaseModel):
     """절단 후 발생하는 예상 재공품(estimated_wip) 1개"""
     wipId: int                     # steel_wip.id (qr_id 연결)
+    batchItemId: Optional[int] = None  # INBOUND batch_item.id (적재 완료 처리용)
     wipStatus: str                 # steel_wip.status
     wipName: str                   # "{두께}X{가로}X{세로}" 형식
     toLocation: Optional[str] = None  # INBOUND batch_item의 to_location 이름
@@ -92,11 +115,18 @@ class ProgressLazerCutting(BaseModel):
     lazerCuttingId: int
     inputWipId: int    # lazer_cutting.steel_wip_id (원자재이면 0)
     material: str      # 투입 재공품의 material
+    estimatedCuttingTime: int = 0  # lazer_cutting.estimated_cutting_time (분)
     wip: List[ProgressWipItem]  # 절단 후 발생하는 재공품들
 
 
 class FieldProgressData(BaseModel):
     """생산 중 화면 응답 — 현재 배치의 절단 작업 전체"""
+    scenarioId: int
+    scenarioTitle: str
+    batchProgressRate: float = 0.0
+    completedTaskCount: int = 0
+    totalTaskCount: int = 0
+    remainingTaskCount: int = 0
     expectedTotalRunningTime: int          # 모든 lazer_cutting.estimated_cutting_time 합산 (분)
     lazer_cutting: List[ProgressLazerCutting]
 
@@ -113,7 +143,13 @@ class FieldReadyData(BaseModel):
     """
     scenarioId: int
     scenarioTitle: str
+    lazerName: Optional[str] = None
     scenarioProgressRate: float          # 0.0 ~ 1.0 (완료 batch_item / 전체 batch_item)
+    completedTaskCount: int = 0
+    totalTaskCount: int = 0
+    remainingTaskCount: int = 0
+    currentBatchRemainingTaskCount: int = 0
+    currentBatchPendingInboundCount: int = 0
     batch: List[FieldBatchGroup]         # 전체 Batch 목록 (RELOCATE / PICKING 분리)
     nextScenarioId: Optional[int] = None
     nextScenarioTitle: Optional[str] = None
@@ -172,3 +208,11 @@ class QrSaveRequest(BaseModel):
     """
     wipQR: Optional[str] = None
     locQR: Optional[str] = None
+
+
+class QrSaveResult(BaseModel):
+    batchItemId: int
+    action: str
+    currentBatchRemainingTaskCount: int = 0
+    currentBatchPendingInboundCount: int = 0
+    shouldMoveToReady: bool = False
