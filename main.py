@@ -9,6 +9,7 @@ from app.routers import users, wips, projects, lantek, scenarios, scheduler, sce
 from app.database import engine, async_session
 from app.models import Base
 from app.seed import seed_database
+from app.core.config import settings
 
 app = FastAPI(title="철강 잔재 재고관리 API", version="1.0.0")
 
@@ -25,15 +26,16 @@ async def startup_event():
     await create_tables()
 
     # 2. 시드 데이터 로드
-    async with async_session() as db:
-        await seed_database(db)
+    if settings.AUTO_SEED:
+        async with async_session() as db:
+            await seed_database(db)
 
 # ---------------------------------------------------------
 # 0. CORS 설정
 # ---------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=settings.cors_origins_list,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
