@@ -54,8 +54,15 @@ jobs:
         shell: bash
         run: |
           BASE="${{ github.event.pull_request.base.ref }}"
+          HEAD="${{ github.event.pull_request.head.ref }}"
           echo "Base Branch: $BASE"
           if [[ "$BASE" != "develop" && "$BASE" != "main" ]]; then
             echo "ERROR: PR base must be develop or main."
+            exit 1
+          fi
+
+          if [[ "$BASE" == "main" && "$HEAD" != "develop" ]]; then
+            echo "ERROR: PRs into main must come from develop."
+            echo "Current source branch: $HEAD"
             exit 1
           fi
