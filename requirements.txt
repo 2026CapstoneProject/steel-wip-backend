@@ -11,3 +11,4 @@ pytest-asyncio==0.23.8
 aiosqlite==0.20.0      # 테스트용 SQLite 비동기 드라이버
 cryptography==42.0.6
 python-multipart==0.0.22
+pypdf==5.4.0
