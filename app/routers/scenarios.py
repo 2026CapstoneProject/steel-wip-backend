@@ -1,40 +1,58 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+# app/routers/scenarios.py
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import List
 
-from app import schemas, crud
 from app.database import get_db
+from app.schemas import BaseResponse
+from app.schemas.scenario import ScenarioCreateRequest, ScenarioResponse
+from app.services import scenario_service
 
-router = APIRouter(prefix="/scenarios", tags=["Scenarios"])
+# app/routers/scenarios.py
+from typing import List
+from app.schemas.scenario import ScenarioResultData
+
+router = APIRouter()
+
+@router.post("/create", response_model=BaseResponse[ScenarioResponse])
+async def create_scenario(
+    request: ScenarioCreateRequest, 
+    db: AsyncSession = Depends(get_db)
+):
+    try:
+        scenario = await scenario_service.get_or_create_scenario(
+            db=db, 
+            project_id=request.project_id, 
+            scenario_due=request.scenario_due
+        )
+        return BaseResponse(
+            status=201,
+            message="시나리오가 생성(또는 조회)되었습니다.",
+            data=scenario
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    
+
+# 1. 시나리오 결과 확인 (GET)
+@router.get("/{scenario_id}", response_model=BaseResponse[List[ScenarioResultData]])
+async def get_scenario_detail(scenario_id: int, db: AsyncSession = Depends(get_db)):
+    data = await scenario_service.get_scenario_result(db, scenario_id)
+    return BaseResponse(
+        status=200,
+        message="시나리오 결과 조회에 성공했습니다.",
+        data=data
+    )
 
 
-# 1. 시나리오 생성
-@router.post("/", response_model=schemas.BaseResponse[schemas.ScenarioResponse], status_code=status.HTTP_201_CREATED)
-async def create_scenario(scenario: schemas.ScenarioCreate, db: AsyncSession = Depends(get_db)):
-    db_scenario = await crud.scenario.create(db=db, scenario=scenario)
-    return schemas.BaseResponse(status=201, message="시나리오 생성에 성공했습니다.", data=db_scenario)
-
-
-# 2. 전체 시나리오 조회
-@router.get("/", response_model=schemas.BaseResponse[List[schemas.ScenarioResponse]])
-async def read_scenarios(db: AsyncSession = Depends(get_db)):
-    scenarios = await crud.scenario.get_all(db=db)
-    return schemas.BaseResponse(status=200, message="시나리오 목록 조회에 성공했습니다.", data=scenarios)
-
-
-# 3. 특정 시나리오 조회
-@router.get("/{scenario_id}", response_model=schemas.BaseResponse[schemas.ScenarioResponse])
-async def read_scenario(scenario_id: int, db: AsyncSession = Depends(get_db)):
-    db_scenario = await crud.scenario.get(db, scenario_id=scenario_id)
-    if db_scenario is None:
-        raise HTTPException(status_code=404, detail="시나리오를 찾을 수 없습니다.")
-    return schemas.BaseResponse(status=200, message="시나리오 조회에 성공했습니다.", data=db_scenario)
-
-
-# 4. 시나리오 상태 수정
-@router.patch("/{scenario_id}", response_model=schemas.BaseResponse[schemas.ScenarioResponse])
-async def update_scenario(scenario_id: int, scenario_update: schemas.ScenarioUpdate, db: AsyncSession = Depends(get_db)):
-    db_scenario = await crud.scenario.update(db, scenario_id=scenario_id, scenario_update=scenario_update)
-    if db_scenario is None:
-        raise HTTPException(status_code=404, detail="수정할 시나리오를 찾을 수 없습니다.")
-    return schemas.BaseResponse(status=200, message="시나리오 수정에 성공했습니다.", data=db_scenario)
+# 3. 시나리오 취소/삭제 (DELETE)
+@router.delete("/{scenario_id}", response_model=BaseResponse)
+async def delete_scenario(scenario_id: int, db: AsyncSession = Depends(get_db)):
+    try:
+        await scenario_service.delete_scenario_cascade(db, scenario_id)
+        return BaseResponse(
+            status=200,
+            message="시나리오 및 관련 데이터가 모두 삭제되었습니다.",
+            data=None
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
