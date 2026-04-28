@@ -46,9 +46,15 @@ main      ← 배포 브랜치 (hotfix/*, release/* 만 PR 허용)
 
 ## GitHub Secrets 등록 필요 항목
 
-| Secret 이름 | 설명 |
-|---|---|
-| `JIRA_BASE_URL` | Jira 도메인 (예: https://xxx.atlassian.net) |
-| `JIRA_API_TOKEN` | Jira API 토큰 |
-| `JIRA_USER_EMAIL` | Jira 계정 이메일 |
-| `JIRA_DONE_TRANSITION_ID` | Jira "완료" 전환 ID |
+| Secret 이름               | 설명                                        |
+| ------------------------- | ------------------------------------------- |
+| `JIRA_BASE_URL`           | Jira 도메인 (예: https://xxx.atlassian.net) |
+| `JIRA_API_TOKEN`          | Jira API 토큰                               |
+| `JIRA_USER_EMAIL`         | Jira 계정 이메일                            |
+| `JIRA_DONE_TRANSITION_ID` | Jira "완료" 전환 ID                         |
+
+## 테스트 DB SEED 입력
+
+1. 박기윤에게 더미 CSV 파일 달라고 하세요.
+2. 최상위 폴더 중 하나로, "seed" 폴더를 만들어서, CSV 파일을 다 넣으세요.
+3. 아주 잘 실행 될 것입니다 ^^
