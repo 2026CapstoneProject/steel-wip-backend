@@ -9,9 +9,12 @@ from typing import List, Optional
 # ─────────────────────────────────────────────
 
 class RelocationBatchItem(BaseModel):
-    """재배치(RELOCATE) 작업 아이템"""
     batchItemId: int
     wipId: int
+    wipQr: Optional[str] = None
+    manufacturer: Optional[str] = None
+    specText: Optional[str] = None
+    weightText: Optional[str] = None
     material: str
     fromLocationName: Optional[str] = None
     toLocationName: Optional[str] = None
@@ -19,34 +22,35 @@ class RelocationBatchItem(BaseModel):
 
 
 class PickingBatchItem(BaseModel):
-    """
-    피킹(PICKING) 작업 아이템.
-    - wipId == 0 이면 원자재 (규격 필드 사용)
-    - wipId > 0  이면 재공품 (위치 필드 사용)
-    """
     batchItemId: int
     wipId: int
-    material: str
-    fromLocationName: Optional[str] = None
-    toLocationName: Optional[str] = None
-    expectedRunningTime: int = 0           # batch_item.expected_running_time (예상 소요 시간)
-    # 원자재인 경우에만 채워지는 필드
-    thickness: Optional[float] = None
-    width: Optional[float] = None
-    height: Optional[float] = None  # DB의 length 컬럼에 대응
-
-
-class InboundBatchItem(BaseModel):
-    """적재(INBOUND) 작업 아이템"""
-    batchItemId: int
-    wipId: int
+    wipQr: Optional[str] = None
+    manufacturer: Optional[str] = None
+    specText: Optional[str] = None
+    weightText: Optional[str] = None
     material: str
     fromLocationName: Optional[str] = None
     toLocationName: Optional[str] = None
     expectedRunningTime: int = 0
     thickness: Optional[float] = None
     width: Optional[float] = None
-    height: Optional[float] = None  # DB의 length 컬럼에 대응
+    height: Optional[float] = None
+
+
+class InboundBatchItem(BaseModel):
+    batchItemId: int
+    wipId: int
+    wipQr: Optional[str] = None
+    manufacturer: Optional[str] = None
+    specText: Optional[str] = None
+    weightText: Optional[str] = None
+    material: str
+    fromLocationName: Optional[str] = None
+    toLocationName: Optional[str] = None
+    expectedRunningTime: int = 0
+    thickness: Optional[float] = None
+    width: Optional[float] = None
+    height: Optional[float] = None
 
 
 class FieldBatchGroup(BaseModel):
@@ -102,13 +106,17 @@ class FieldBatchItem(BaseModel):
 
 class ProgressWipItem(BaseModel):
     """절단 후 발생하는 예상 재공품(estimated_wip) 1개"""
-    wipId: int                     # steel_wip.id (qr_id 연결)
-    batchItemId: Optional[int] = None  # INBOUND batch_item.id (적재 완료 처리용)
-    wipStatus: str                 # steel_wip.status
-    wipName: str                   # "{두께}X{가로}X{세로}" 형식
-    toLocation: Optional[str] = None  # INBOUND batch_item의 to_location 이름
-    status: str                    # "적재 대기"(IN_PROGRESS) | "적재 완료"(COMPLETED)
-
+    wipId: int
+    batchItemId: Optional[int] = None
+    wipQr: Optional[str] = None
+    manufacturer: Optional[str] = None
+    material: Optional[str] = None
+    specText: Optional[str] = None
+    weightText: Optional[str] = None
+    wipStatus: str
+    wipName: str
+    toLocation: Optional[str] = None
+    status: str
 
 class ProgressLazerCutting(BaseModel):
     """절단 작업 1건 — 투입 재공품 + 발생 예상 재공품 목록"""

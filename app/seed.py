@@ -7,25 +7,46 @@
 - 생산계획자는 Office에서 LANTEK import → 시나리오 확인 → 발행을 수행한다.
 - 작업자는 발행 이후에만 App(Field)에서 시나리오를 확인할 수 있다.
 """
-
+# app/seed.py
+import csv
+from pathlib import Path
+from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import delete
+
 from app.models import (
     Locations, QrCodes, Users, SteelWip, Projects, BatchItems,
     EstimatedWips, LazerCutting, Batch, Scenarios
 )
-from sqlalchemy import delete
-from datetime import date
-from app.services.demo_solver_service import (
-    load_demo_seed_input_wips,
-    load_demo_seed_output_wips,
-)
 
+# CSV 파일들이 저장된 디렉토리 경로 (프로젝트 구조에 맞게 수정 가능)
+CSV_DIR = Path(__file__).resolve().parent.parent / "seed"
+
+print(f"CSV Directory Path: {CSV_DIR}")
+
+def read_csv(filename: str) -> list:
+    """CSV 파일을 읽어 딕셔너리 리스트로 반환 (다중 인코딩 지원)"""
+    file_path = CSV_DIR / filename
+    if not file_path.exists():
+        print(f"Warning: {filename} not found at {file_path}")
+        return []
+        
+    # 1. 먼저 utf-8-sig (보편적인 UTF-8)로 시도
+    try:
+        with open(file_path, mode='r', encoding='utf-8-sig') as f:
+            reader = csv.DictReader(f)
+            return list(reader)
+    except UnicodeDecodeError:
+        # 2. 실패 시 엑셀 기본 인코딩인 cp949(euc-kr)로 다시 시도
+        with open(file_path, mode='r', encoding='cp949') as f:
+            reader = csv.DictReader(f)
+            return list(reader)
 
 async def seed_database(db: AsyncSession) -> None:
-    """데이터베이스를 초기화하고 샘플 데이터를 삽입합니다."""
+    """데이터베이스를 초기화하고 CSV 샘플 데이터를 삽입합니다."""
 
     # ─────────────────────────────────────────────────────────
-    # 1. 모든 테이블 데이터 삭제 (기존 데이터 제거)
+    # 1. 모든 테이블 데이터 역순 삭제 (기존 데이터 제거)
     # ─────────────────────────────────────────────────────────
     await db.execute(delete(BatchItems))
     await db.execute(delete(EstimatedWips))
@@ -37,94 +58,99 @@ async def seed_database(db: AsyncSession) -> None:
     await db.execute(delete(Users))
     await db.execute(delete(QrCodes))
     await db.execute(delete(Locations))
+    await db.commit() # 삭제 후 커밋
 
     # ─────────────────────────────────────────────────────────
-    # 2. Locations (창고 구역)
+    # 2. Locations (창고 구역) - locations.csv 참조
     # ─────────────────────────────────────────────────────────
+    loc_data = read_csv('locations.csv')
     locations = [
-        Locations(id=1, loc_name='Zone A-1', loc_can_stock=1, loc_stack_height=3),
-        Locations(id=2, loc_name='Zone A-2', loc_can_stock=1, loc_stack_height=3),
-        Locations(id=3, loc_name='Zone A-3', loc_can_stock=1, loc_stack_height=3),
-        Locations(id=4, loc_name='Zone B-1', loc_can_stock=1, loc_stack_height=3),
-        Locations(id=5, loc_name='Zone B-2', loc_can_stock=1, loc_stack_height=3),
-        Locations(id=6, loc_name='Zone B-3', loc_can_stock=1, loc_stack_height=3),
-        Locations(id=7, loc_name='Zone C-1', loc_can_stock=1, loc_stack_height=3),
-        Locations(id=8, loc_name='Zone C-2', loc_can_stock=1, loc_stack_height=3),
-        Locations(id=9, loc_name='Zone C-3', loc_can_stock=1, loc_stack_height=3),
-        Locations(id=10, loc_name='LAZER1', loc_can_stock=0, loc_stack_height=0),
-        Locations(id=11, loc_name='LAZER2', loc_can_stock=0, loc_stack_height=0),
+        Locations(
+            id=int(row['id']), 
+            loc_name=row['loc_name'],
+            # csv에 없는 기본값 설정
+            loc_can_stock=1 if 'LAZER' not in row['loc_name'] else 0,
+            loc_stack_height=3 if 'LAZER' not in row['loc_name'] else 0
+        ) for row in loc_data
     ]
-    db.add_all(locations)
-    await db.flush()
+    if locations:
+        db.add_all(locations)
+        await db.flush()
 
     # ─────────────────────────────────────────────────────────
-    # 3. QR Codes
+    # 3. QR Codes - qr_codes.csv 참조
     # ─────────────────────────────────────────────────────────
-    seed_input_wips = load_demo_seed_input_wips()
-    seed_output_wips = load_demo_seed_output_wips()
-    seed_all_wips = [*seed_input_wips, *seed_output_wips]
+    qr_data = read_csv('qr_codes.csv')
     qr_codes = [
-        QrCodes(
-            id=spec.id,
-            qr_code=(f'QR-WIP-{spec.id:03d}' if spec.status == 'IN_STOCK' else f'DEMO-WIP-{spec.id}')
-        )
-        for spec in seed_all_wips
+        QrCodes(id=int(row['id']), qr_code=row['qr_code'])
+        for row in qr_data
     ]
-    db.add_all(qr_codes)
-    await db.flush()
+    if qr_codes:
+        db.add_all(qr_codes)
+        await db.flush()
 
     # ─────────────────────────────────────────────────────────
-    # 4. Users
+    # 4. Users - users.csv 참조
     # ─────────────────────────────────────────────────────────
+    user_data = read_csv('users.csv')
     users = [
-        Users(id=1, username='김철수', department='생산관리팀', role='OFFICE', user_num=1001),
-        Users(id=2, username='이현장', department='생산팀', role='FIELD', user_num=2001),
+        Users(
+            id=int(row['id']),
+            username=row['username'],
+            department=row['department'],
+            role=row['role'],
+            user_num=int(row['user_num'])
+        ) for row in user_data
     ]
-    db.add_all(users)
-    await db.flush()
+    if users:
+        db.add_all(users)
+        await db.flush()
 
     # ─────────────────────────────────────────────────────────
-    # 5. Steel WIPs
+    # 5. Projects - projects.csv 참조
     # ─────────────────────────────────────────────────────────
-    steel_wips = [
-        SteelWip(
-            id=spec.id,
-            status=spec.status,
-            material=spec.material,
-            thickness=spec.thickness,
-            width=spec.width,
-            length=spec.length,
-            weight=round(spec.thickness * spec.width * spec.length * (7.85 / 1_000_000), 1),
-            manufacturer=spec.manufacturer,
-            location_id=spec.location_id,
-            stack_level=spec.stack_level,
-            qr_id=spec.id,
-        )
-        for spec in seed_all_wips
-    ]
-    db.add_all(steel_wips)
-    await db.flush()
-
-    # ─────────────────────────────────────────────────────────
-    # 6. Projects
-    # ─────────────────────────────────────────────────────────
+    project_data = read_csv('projects.csv')
     projects = [
-        Projects(id=1, title='철강 가공 프로젝트 A', project_due=date(2026, 5, 30)),
-        Projects(id=2, title='철강 가공 프로젝트 B', project_due=date(2026, 6, 15)),
+        Projects(
+            id=int(row['id']),
+            title=row['title'],
+            project_due=datetime.strptime(row['project_due'], '%Y-%m-%d').date()
+        ) for row in project_data
     ]
-    db.add_all(projects)
-    await db.flush()
+    if projects:
+        db.add_all(projects)
+        await db.flush()
 
     # ─────────────────────────────────────────────────────────
-    # 7~11. 시나리오/배치/절단/예상재공품/작업지시는 초기 비움
+    # 6. Steel WIPs - steel_wip.csv 참조
     # ─────────────────────────────────────────────────────────
-    # 사용자 여정:
-    #   1) Office에서 프로젝트 선택
-    #   2) LANTEK import로 시나리오 생성
-    #   3) 시나리오 발행 후 Field에서 작업 시작
+    wip_data = read_csv('steel_wip.csv')
+    steel_wips = []
+    for row in wip_data:
+        # 빈 문자열 처리
+        loc_id = int(row['location_id']) if row['location_id'] else None
+        stack_lvl = int(row['stack_level']) if row['stack_level'] else None
+        q_id = int(row['qr_id']) if row['qr_id'] else None
+        
+        steel_wips.append(SteelWip(
+            id=int(row['id']),
+            status=row['status'],
+            manufacturer=row['manufacturer'] if row['manufacturer'] else "POSCO", # 빈값이면 기본값
+            material=row['material'],
+            thickness=float(row['thickness']),
+            width=float(row['width']),
+            length=float(row['length']),
+            weight=float(row['weight']),
+            location_id=loc_id,
+            stack_level=stack_lvl,
+            qr_id=q_id
+        ))
+    if steel_wips:
+        db.add_all(steel_wips)
+        await db.flush()
 
     # ─────────────────────────────────────────────────────────
     # 데이터 커밋
     # ─────────────────────────────────────────────────────────
     await db.commit()
-    print("✅ 시드 데이터 초기화 완료!")
+    print("✅ CSV 기반 시드 데이터 초기화 완료!")
