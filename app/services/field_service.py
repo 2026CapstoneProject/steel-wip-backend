@@ -517,13 +517,19 @@ async def get_field_progress(db: AsyncSession) -> list:
         wip_items: list[ProgressWipItem] = []
 
         for ew in ew_list:
-            # qr_id → 실제 steel_wip 조회
+            # qr_id -> 실제 steel_wip 조회
             wip_stmt = select(SteelWip).where(SteelWip.qr_id == ew.qr_id)
             actual_wip = (await db.execute(wip_stmt)).scalars().first()
             if not actual_wip:
                 continue
 
-            # 같은 배치의 INBOUND batch_item 조회 (적재 대상)
+            # QR 문자열 조회
+            qr_code_value = None
+            if ew.qr_id:
+                qr = await db.get(QrCodes, ew.qr_id)
+                qr_code_value = qr.qr_code if qr else None
+
+            # 같은 배치의 INBOUND batch_item 조회
             inbound_stmt = select(BatchItems).where(
                 BatchItems.batch_id == batch.id,
                 BatchItems.steel_wip_id == actual_wip.id,
@@ -544,24 +550,42 @@ async def get_field_progress(db: AsyncSession) -> list:
                 elif inbound_item.status == "IN_PROGRESS":
                     item_status = "적재 대기"
                 else:
-                    # PENDING / BEFORE_PENDING: 아직 시작 전
                     item_status = inbound_item.status
 
-            # wipName: "{두께}X{가로}X{세로}"
+            # 표시용 이름/명세
             wip_name = (
                 f"{_fmt_dim(actual_wip.thickness)}"
                 f"X{_fmt_dim(actual_wip.width)}"
                 f"X{_fmt_dim(actual_wip.length)}"
             )
 
-            wip_items.append(ProgressWipItem(
-                wipId=actual_wip.id,
-                batchItemId=inbound_item.id if inbound_item else None,
-                wipStatus=actual_wip.status,
-                wipName=wip_name,
-                toLocation=to_loc.loc_name if to_loc else None,
-                status=item_status,
-            ))
+            spec_text = (
+                f"{_fmt_dim(actual_wip.thickness)} x "
+                f"{_fmt_dim(actual_wip.width)} x "
+                f"{_fmt_dim(actual_wip.length)}"
+            )
+
+            weight_text = (
+                f"{_fmt_dim(actual_wip.weight)} kg"
+                if actual_wip.weight is not None
+                else None
+            )
+
+            wip_items.append(
+                ProgressWipItem(
+                    wipId=actual_wip.id,
+                    batchItemId=inbound_item.id if inbound_item else None,
+                    wipQr=qr_code_value,
+                    manufacturer=actual_wip.manufacturer or ew.manufacturer,
+                    material=actual_wip.material or ew.material,
+                    specText=spec_text,
+                    weightText=weight_text,
+                    wipStatus=actual_wip.status,
+                    wipName=wip_name,
+                    toLocation=to_loc.loc_name if to_loc else None,
+                    status=item_status,
+                )
+            )
 
         lc_groups.append(ProgressLazerCutting(
             lazerCuttingId=lc.id,

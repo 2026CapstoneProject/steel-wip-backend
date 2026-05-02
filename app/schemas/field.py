@@ -106,13 +106,17 @@ class FieldBatchItem(BaseModel):
 
 class ProgressWipItem(BaseModel):
     """절단 후 발생하는 예상 재공품(estimated_wip) 1개"""
-    wipId: int                     # steel_wip.id (qr_id 연결)
-    batchItemId: Optional[int] = None  # INBOUND batch_item.id (적재 완료 처리용)
-    wipStatus: str                 # steel_wip.status
-    wipName: str                   # "{두께}X{가로}X{세로}" 형식
-    toLocation: Optional[str] = None  # INBOUND batch_item의 to_location 이름
-    status: str                    # "적재 대기"(IN_PROGRESS) | "적재 완료"(COMPLETED)
-
+    wipId: int
+    batchItemId: Optional[int] = None
+    wipQr: Optional[str] = None
+    manufacturer: Optional[str] = None
+    material: Optional[str] = None
+    specText: Optional[str] = None
+    weightText: Optional[str] = None
+    wipStatus: str
+    wipName: str
+    toLocation: Optional[str] = None
+    status: str
 
 class ProgressLazerCutting(BaseModel):
     """절단 작업 1건 — 투입 재공품 + 발생 예상 재공품 목록"""
