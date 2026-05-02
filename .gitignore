@@ -26,5 +26,5 @@ htmlcov/
 # alembic 자동 생성 파일 (versions는 추적)
 *.pyc
 
-# seed 데이터 폴더
-seed/
+# seed 데이터 폴더 - Demo 데이터 Open
+# seed/
