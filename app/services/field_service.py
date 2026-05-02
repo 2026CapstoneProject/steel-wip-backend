@@ -37,16 +37,6 @@ async def _build_batch_group(
     exclude_completed: bool = False,
     only_completed: bool = False,
 ) -> FieldBatchGroup:
-    """
-    Batch 하나를 받아 재배치 / 피킹 / 적재 목록으로 분리한 FieldBatchGroup을 반환한다.
-    batch_item_order 기준으로 정렬.
-
-    exclude_completed=True이면 COMPLETED 상태 아이템을 제외한다.
-    (생산 준비 화면에서 완료된 개별 아이템을 숨기기 위함)
-
-    only_completed=True이면 COMPLETED 상태 아이템만 포함한다.
-    (작업 완료 화면에서 완료된 아이템만 보여주기 위함)
-    """
     items_stmt = (
         select(BatchItems)
         .where(BatchItems.batch_id == batch.id)
@@ -63,14 +53,27 @@ async def _build_batch_group(
     inbound_items: list[InboundBatchItem] = []
 
     for item in items:
-        wip      = await db.get(SteelWip,  item.steel_wip_id) if item.steel_wip_id else None
+        wip = await db.get(SteelWip, item.steel_wip_id) if item.steel_wip_id else None
         from_loc = await db.get(Locations, item.from_location) if item.from_location else None
-        to_loc   = await db.get(Locations, item.to_location)   if item.to_location   else None
+        to_loc = await db.get(Locations, item.to_location) if item.to_location else None
+
+        wip_qr = None
+        if wip and wip.qr_id:
+            qr = await db.get(QrCodes, wip.qr_id)
+            wip_qr = qr.qr_code if qr else None
+
+        manufacturer = wip.manufacturer if wip else None
+        spec_text = _build_spec_text(wip)
+        weight_text = _build_weight_text(wip)
 
         if item.batch_item_action == "RELOCATE":
             relocation_items.append(RelocationBatchItem(
                 batchItemId=item.id,
                 wipId=wip.id if wip else 0,
+                wipQr=wip_qr,
+                manufacturer=manufacturer,
+                specText=spec_text,
+                weightText=weight_text,
                 material=wip.material if wip else "",
                 fromLocationName=from_loc.loc_name if from_loc else None,
                 toLocationName=to_loc.loc_name if to_loc else None,
@@ -81,19 +84,27 @@ async def _build_batch_group(
             picking_items.append(PickingBatchItem(
                 batchItemId=item.id,
                 wipId=wip.id if wip else 0,
+                wipQr=wip_qr,
+                manufacturer=manufacturer,
+                specText=spec_text,
+                weightText=weight_text,
                 material=wip.material if wip else "",
                 fromLocationName=from_loc.loc_name if from_loc else None,
                 toLocationName=to_loc.loc_name if to_loc else None,
                 expectedRunningTime=item.expected_running_time or 0,
-                # 원자재(wipId == 0)인 경우에만 규격 필드를 채운다
                 thickness=wip.thickness if wip else None,
                 width=wip.width if wip else None,
-                height=wip.length if wip else None,  # DB length → height 매핑
+                height=wip.length if wip else None,
             ))
+
         elif item.batch_item_action == "INBOUND":
             inbound_items.append(InboundBatchItem(
                 batchItemId=item.id,
                 wipId=wip.id if wip else 0,
+                wipQr=wip_qr,
+                manufacturer=manufacturer,
+                specText=spec_text,
+                weightText=weight_text,
                 material=wip.material if wip else "",
                 fromLocationName=from_loc.loc_name if from_loc else None,
                 toLocationName=to_loc.loc_name if to_loc else None,
@@ -108,8 +119,6 @@ async def _build_batch_group(
         picking=picking_items,
         inbound=inbound_items,
     )
-
-
 async def _is_batch_completed(db: AsyncSession, batch_id: int) -> bool:
     """
     해당 Batch의 모든 BatchItem이 COMPLETED 상태인지 확인한다.
@@ -249,6 +258,29 @@ async def _get_active_processing_batch(db: AsyncSession, scenario_id: int) -> Op
 
     return None
 
+# 2026-04-30 추가 헬퍼
+def _fmt_text_number(v: float | None) -> str:
+    if v is None:
+        return ""
+    if float(v).is_integer():
+        return str(int(v))
+    return f"{v}".rstrip("0").rstrip(".")
+
+
+def _build_spec_text(wip: SteelWip | None) -> str | None:
+    if not wip:
+        return None
+    return (
+        f"{_fmt_text_number(wip.thickness)}X"
+        f"{_fmt_text_number(wip.width)}X"
+        f"{_fmt_text_number(wip.length)}"
+    )
+
+
+def _build_weight_text(wip: SteelWip | None) -> str | None:
+    if not wip or wip.weight is None:
+        return None
+    return f"{_fmt_text_number(wip.weight)}kg"
 
 # ─────────────────────────────────────────────
 # GET /api/field/end
