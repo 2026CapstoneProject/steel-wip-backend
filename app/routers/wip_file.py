@@ -8,6 +8,13 @@ from app.database import get_db
 from app.models import SteelWip, SteelWipStatus
 from app.services.wip_file_service import preview_wip_file, confirm_wip_updates, delete_wip_with_reorder
 
+from fastapi.responses import Response
+from app.services.wip_export_service import export_wip_csv, export_wip_xlsx
+
+from typing import Optional
+
+from fastapi.responses import StreamingResponse
+
 router = APIRouter()
 
 ALLOWED_EXTENSIONS = {"csv", "xlsx", "xls"}
@@ -31,6 +38,26 @@ class ConfirmRequest(BaseModel):
     updates: List[WipUpdateItem] = []
     creates: List[WipCreateItem] = []
 
+# ── 내보내기 (export) ─────────────────────────────────────────────────────────
+@router.get("/file/export")
+async def export_wip_file(
+    format: Optional[str] = Query("xlsx", description="파일 형식: xlsx 또는 csv"),
+    db: AsyncSession = Depends(get_db),
+):
+    if format == "csv":
+        content = await export_wip_csv(db)
+        return StreamingResponse(
+            iter([content]),
+            media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=steel_wip_export.csv"},
+        )
+
+    buffer = await export_wip_xlsx(db)
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=steel_wip_export.xlsx"},
+    )
 
 # ── 1단계: 미리보기 ──────────────────────────────────────────────────────────
 
@@ -132,3 +159,4 @@ async def delete_wips_by_ids(
             "skipped":         result["skipped"],
         },
     }
+
