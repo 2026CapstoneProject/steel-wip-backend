@@ -5,7 +5,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 import asyncio
 
-from app.routers import users, wips, projects, lantek, scenarios, scheduler, scenario_cart, scenario_send, field, wip_file_router
 from app.routers import users, wips, projects, lantek, scenarios, scheduler, scenario_cart, scenario_send, field, wip_file
 from app.database import engine, async_session
 from app.models import Base
