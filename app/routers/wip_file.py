@@ -132,3 +132,37 @@ async def delete_wips_by_ids(
             "skipped":         result["skipped"],
         },
     }
+
+# ── 내보내기 (export) ─────────────────────────────────────────────────────────
+
+from fastapi.responses import Response
+from app.services.wip_export_service import export_wip_csv, export_wip_xlsx
+
+
+@router.get("/file/export")
+async def export_wip(
+    format: str = Query("xlsx", regex="^(csv|xlsx)$"),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    현재 DB의 재공품 전체를 CSV 또는 XLSX로 다운로드.
+    Query param: format=csv | format=xlsx (기본값: xlsx)
+    """
+    if format == "csv":
+        content = await export_wip_csv(db)
+        return Response(
+            content=content,
+            media_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": "attachment; filename*=UTF-8''steel_wip_export.csv"
+            },
+        )
+    else:
+        content = await export_wip_xlsx(db)
+        return Response(
+            content=content,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={
+                "Content-Disposition": "attachment; filename*=UTF-8''steel_wip_export.xlsx"
+            },
+        )
