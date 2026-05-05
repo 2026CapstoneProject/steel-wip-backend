@@ -39,7 +39,7 @@ class ConfirmRequest(BaseModel):
     creates: List[WipCreateItem] = []
 
 # ── 내보내기 (export) ─────────────────────────────────────────────────────────
-@router.get("/export")
+@router.get("/file/export")
 async def export_wip_file(
     format: Optional[str] = Query("xlsx", description="파일 형식: xlsx 또는 csv"),
     db: AsyncSession = Depends(get_db),
