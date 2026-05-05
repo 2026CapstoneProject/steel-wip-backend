@@ -1,4 +1,3 @@
-# app/services/wip_file_service.py
 import io
 import csv
 import openpyxl
@@ -8,11 +7,12 @@ from sqlalchemy import select
 from app.models import SteelWip, QrCodes, Locations, SteelWipStatus
 
 
+# ── 파일 파싱 ────────────────────────────────────────────────────────────────
+
 def parse_file(filename: str, content: bytes) -> list[dict]:
     ext = filename.rsplit(".", 1)[-1].lower()
 
     if ext == "csv":
-        # 인코딩 순서대로 시도: utf-8-sig → cp949(euc-kr) → latin-1(fallback)
         for encoding in ("utf-8-sig", "cp949", "latin-1"):
             try:
                 text = content.decode(encoding)
@@ -35,12 +35,14 @@ def parse_file(filename: str, content: bytes) -> list[dict]:
         ]
         wb.close()
         return result
-
     else:
         raise ValueError(f"지원하지 않는 파일 형식입니다: .{ext}")
 
+
+# ── 헬퍼 ─────────────────────────────────────────────────────────────────────
+
 def _to_float(val) -> float | None:
-    if val is None or (isinstance(val, float) and val != val):  # NaN check
+    if val is None or (isinstance(val, float) and val != val):
         return None
     try:
         return float(str(val).replace(",", "").strip())
@@ -63,49 +65,27 @@ def _eq(a, b) -> bool:
         return str(a).strip() == str(b).strip()
 
 
+def _parse_location(file_row: dict, loc_list) -> tuple[int | None, int | None]:
+    """'위치' 컬럼(loc_name-stack_level)을 파싱하여 (location_id, stack_level) 반환"""
+    raw = str(file_row.get("위치") or "").strip()
+    if raw and "-" in raw:
+        parts = raw.rsplit("-", 1)
+        try:
+            stack = int(parts[1])
+            matched = next((l for l in loc_list if l.loc_name == parts[0]), None)
+            if matched:
+                return matched.id, stack
+        except (ValueError, IndexError):
+            pass
+    return None, None
+
+
 def _extract_fields(file_row: dict, loc_list, db_wip: SteelWip) -> dict:
-    """파일 한 행에서 업데이트할 필드값을 추출"""
-    file_location_id = db_wip.location_id
-    file_stack_level = db_wip.stack_level
-
-    file_location_raw = str(file_row.get("위치") or "").strip()
-    if file_location_raw and "-" in file_location_raw:
-        parts = file_location_raw.rsplit("-", 1)
-        try:
-            stack_from_file = int(parts[1])
-            matched_loc = next((l for l in loc_list if l.loc_name == parts[0]), None)
-            if matched_loc:
-                file_location_id = matched_loc.id
-                file_stack_level = stack_from_file
-        except (ValueError, IndexError):
-            pass
-
-    return {
-        "material":     str(file_row.get("재질") or "").strip() or None,
-        "thickness":    _to_float(file_row.get("두께")),
-        "width":        _to_float(file_row.get("폭")),
-        "length":       _to_float(file_row.get("길이")),
-        "weight":       _to_float(file_row.get("재고중량")),
-        "manufacturer": str(file_row.get("제조사") or "").strip() or None,
-        "location_id":  file_location_id,
-        "stack_level":  file_stack_level,
-    }
-def _extract_fields_new(file_row: dict, loc_list) -> dict:
-    """DB WIP 없이 파일 행에서 필드값만 추출 (신규 생성용)"""
-    location_id = None
-    stack_level = None
-
-    file_location_raw = str(file_row.get("위치") or "").strip()
-    if file_location_raw and "-" in file_location_raw:
-        parts = file_location_raw.rsplit("-", 1)
-        try:
-            stack_from_file = int(parts[1])
-            matched_loc = next((l for l in loc_list if l.loc_name == parts[0]), None)
-            if matched_loc:
-                location_id = matched_loc.id
-                stack_level = stack_from_file
-        except (ValueError, IndexError):
-            pass
+    """업데이트용 — 위치 파싱 실패 시 기존 DB 값 유지"""
+    location_id, stack_level = _parse_location(file_row, loc_list)
+    if location_id is None:
+        location_id = db_wip.location_id
+        stack_level  = db_wip.stack_level
 
     return {
         "material":     str(file_row.get("재질") or "").strip() or None,
@@ -118,8 +98,26 @@ def _extract_fields_new(file_row: dict, loc_list) -> dict:
         "stack_level":  stack_level,
     }
 
+
+def _extract_fields_new(file_row: dict, loc_list) -> dict:
+    """신규 생성용 — DB WIP 없이 파일 값만으로 추출"""
+    location_id, stack_level = _parse_location(file_row, loc_list)
+
+    return {
+        "material":     str(file_row.get("재질") or "").strip() or None,
+        "thickness":    _to_float(file_row.get("두께")),
+        "width":        _to_float(file_row.get("폭")),
+        "length":       _to_float(file_row.get("길이")),
+        "weight":       _to_float(file_row.get("재고중량")),
+        "manufacturer": str(file_row.get("제조사") or "").strip() or None,
+        "location_id":  location_id,
+        "stack_level":  stack_level,
+    }
+
+
+# ── 공통 데이터 빌드 ──────────────────────────────────────────────────────────
+
 async def _build_common_data(db: AsyncSession, filename: str, content: bytes):
-    """파싱 + DB 조회 공통 로직"""
     rows = parse_file(filename, content)
     if not rows:
         raise ValueError("파일에 데이터가 없습니다.")
@@ -171,13 +169,13 @@ async def _build_missing_in_file(
     ]
 
 
-# ── 1단계: 미리보기 (DB 변경 없음) ──────────────────────────────────────────
+# ── 1단계: 미리보기 ──────────────────────────────────────────────────────────
 
 async def preview_wip_file(db: AsyncSession, filename: str, content: bytes) -> dict:
     rows, qr_map, loc_list, file_qr_set = await _build_common_data(db, filename, content)
 
     to_update = []
-    to_create = []   # ← 추가
+    to_create = []
     skipped = []
     unchanged = 0
 
@@ -188,16 +186,17 @@ async def preview_wip_file(db: AsyncSession, filename: str, content: bytes) -> d
             continue
 
         qr_obj = qr_map.get(qr_code_val)
-        new_fields = _extract_fields_new(file_row, loc_list)  # ← loc_list 전달
 
+        # ── QR 자체가 DB에 없음 → 신규 등록 후보
         if qr_obj is None:
             to_create.append({
                 "qr_code": qr_code_val,
                 "qr_id":   None,
-                "fields":  new_fields,
+                "fields":  _extract_fields_new(file_row, loc_list),
             })
             continue
 
+        # ── QR은 있지만 연결된 WIP 없음 → 신규 등록 후보
         wip_result = await db.execute(select(SteelWip).where(SteelWip.qr_id == qr_obj.id))
         db_wip = wip_result.scalars().first()
 
@@ -205,10 +204,11 @@ async def preview_wip_file(db: AsyncSession, filename: str, content: bytes) -> d
             to_create.append({
                 "qr_code": qr_code_val,
                 "qr_id":   qr_obj.id,
-                "fields":  new_fields,
+                "fields":  _extract_fields_new(file_row, loc_list),
             })
             continue
 
+        # ── 생산 투입 중 → 수정 불가
         if _is_in_use(db_wip):
             skipped.append({
                 "qr_code": qr_code_val,
@@ -216,9 +216,13 @@ async def preview_wip_file(db: AsyncSession, filename: str, content: bytes) -> d
             })
             continue
 
-        is_same = all([
-            _eq(getattr(db_wip, k), v) for k, v in new_fields.items() if v is not None
-        ])
+        # ── 변경 사항 비교
+        update_fields = _extract_fields(file_row, loc_list, db_wip)
+        is_same = all(
+            _eq(getattr(db_wip, k), v)
+            for k, v in update_fields.items()
+            if v is not None
+        )
 
         if is_same:
             unchanged += 1
@@ -237,43 +241,31 @@ async def preview_wip_file(db: AsyncSession, filename: str, content: bytes) -> d
                 "location_id":  db_wip.location_id,
                 "stack_level":  db_wip.stack_level,
             },
-            "after": new_fields,
+            "after": update_fields,
         })
 
     missing_in_file = await _build_missing_in_file(db, qr_map, file_qr_set)
 
     return {
         "to_update":       to_update,
-        "to_create":       to_create,   # ← 추가
+        "to_create":       to_create,
         "skipped":         skipped,
         "unchanged":       unchanged,
         "missing_in_file": missing_in_file,
     }
 
-# ── 2단계: 확정 반영 (실제 DB 업데이트) ──────────────────────────────────────
 
-async def confirm_wip_file(db: AsyncSession, wip_ids: list[int]) -> dict:
-    """사용자가 선택한 wip_id에 대해, preview 때 계산된 값을 재계산하여 반영.
-    
-    ※ preview 결과를 서버에 저장하지 않으므로 DB를 다시 조회하여 재검증합니다.
-    """
-    # confirm 요청에는 변경할 필드값도 함께 받아야 합니다.
-    # → 아래 confirm_wip_updates 함수 참고
-    pass
-
+# ── 2단계: 확정 반영 ─────────────────────────────────────────────────────────
 
 async def confirm_wip_updates(
     db: AsyncSession,
-    updates: list[dict],  # [{"wip_id": 1, "after": {...}}, ...]
-    creates: list[dict], 
+    updates: list[dict],
+    creates: list[dict],
 ) -> dict:
-    """
-    프론트에서 preview 응답의 to_update 중 사용자가 선택한 항목만 전달.
-    각 항목의 after 값을 서버에서 재검증 후 DB에 반영.
-    """
     updated = []
     skipped = []
 
+    # 수정
     for item in updates:
         wip_id = item.get("wip_id")
         new_fields: dict = item.get("after", {})
@@ -285,7 +277,6 @@ async def confirm_wip_updates(
             skipped.append({"wip_id": wip_id, "reason": "존재하지 않는 재공품입니다."})
             continue
 
-        # 재검증: 생산 투입 여부
         if _is_in_use(db_wip):
             skipped.append({
                 "wip_id": wip_id,
@@ -299,20 +290,20 @@ async def confirm_wip_updates(
 
         updated.append(wip_id)
 
+    # 신규 생성
     created = []
     for item in creates:
         qr_code_val = item.get("qr_code")
         fields: dict = item.get("fields", {})
-        qr_id = item.get("qr_id")  # QR이 이미 있는 경우
+        qr_id = item.get("qr_id")
 
-        # QR코드가 DB에 없으면 새로 생성
+        # QR이 DB에 없으면 새로 생성
         if qr_id is None:
             new_qr = QrCodes(qr_code=qr_code_val)
             db.add(new_qr)
-            await db.flush()   # id 발급
+            await db.flush()  # id 발급
             qr_id = new_qr.id
 
-        # location_id 파싱 (위치 문자열로부터)
         new_wip = SteelWip(
             qr_id=qr_id,
             status=SteelWipStatus.IN_STOCK,
@@ -329,9 +320,66 @@ async def confirm_wip_updates(
         created.append(qr_code_val)
 
     await db.commit()
+    return {"updated": updated, "skipped": skipped, "created": created}
 
-    return {
-        "updated": updated,
-        "skipped": skipped,
-        "created": created,  
-    }
+
+# ── 삭제 + 층수 재정렬 + QR 삭제 ─────────────────────────────────────────────
+
+async def delete_wip_with_reorder(db: AsyncSession, wip_ids: list[int]) -> dict:
+    """
+    1. 생산 투입 중이면 삭제 거부
+    2. WIP 삭제
+    3. 연결된 QR 코드 삭제
+    4. 동일 location_id 내 남은 WIP의 stack_level을 1부터 빈 틈 없이 재정렬
+    """
+    deleted = []
+    skipped = []
+    affected_locations: set[int] = set()
+
+    for wip_id in wip_ids:
+        result = await db.execute(select(SteelWip).where(SteelWip.id == wip_id))
+        wip = result.scalars().first()
+
+        if wip is None:
+            skipped.append({"wip_id": wip_id, "reason": "존재하지 않는 재공품입니다."})
+            continue
+
+        if _is_in_use(wip):
+            skipped.append({
+                "wip_id": wip_id,
+                "reason": f"이미 생산에 투입된 재고는 삭제할 수 없습니다. (현재 상태: {wip.status.value})",
+            })
+            continue
+
+        location_id = wip.location_id
+
+        # QR 삭제
+        if wip.qr_id is not None:
+            qr_result = await db.execute(select(QrCodes).where(QrCodes.id == wip.qr_id))
+            qr_obj = qr_result.scalars().first()
+            if qr_obj:
+                await db.delete(qr_obj)
+
+        await db.delete(wip)
+        deleted.append(wip_id)
+
+        if location_id is not None:
+            affected_locations.add(location_id)
+
+    # 삭제 반영 후 재정렬
+    await db.flush()
+
+    for loc_id in affected_locations:
+        remaining_result = await db.execute(
+            select(SteelWip)
+            .where(SteelWip.location_id == loc_id)
+            .order_by(SteelWip.stack_level.asc())
+        )
+        remaining_wips = remaining_result.scalars().all()
+
+        for new_level, wip in enumerate(remaining_wips, start=1):
+            if wip.stack_level != new_level:
+                wip.stack_level = new_level
+
+    await db.commit()
+    return {"deleted": deleted, "skipped": skipped}
