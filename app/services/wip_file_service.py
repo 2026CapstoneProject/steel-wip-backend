@@ -231,19 +231,18 @@ async def preview_wip_file(db: AsyncSession, filename: str, content: bytes) -> d
 
         # ── 변경 사항 비교
         update_fields = _extract_fields(file_row, loc_list, db_wip)
-        is_same = all(
-            _eq(getattr(db_wip, k), v)
-            for k, v in update_fields.items()
-            if v is not None
-        )
 
-        ALWAYS_COMPARE_FIELDS = {"location_id", "stack_level"}  # None이어도 비교할 필드
-
+        ALWAYS_COMPARE_FIELDS = {"location_id", "stack_level"}
         is_same = all(
             _eq(getattr(db_wip, k), v)
             for k, v in update_fields.items()
             if v is not None or k in ALWAYS_COMPARE_FIELDS
         )
+
+        if is_same:
+            unchanged += 1   # ← unchanged 카운터 증가
+            continue         # ← to_update에 추가하지 않고 넘어감
+
         to_update.append({
             "wip_id":  db_wip.id,
             "qr_code": qr_code_val,
