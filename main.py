@@ -6,6 +6,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 import asyncio
 
 from app.routers import users, wips, projects, lantek, scenarios, scheduler, scenario_cart, scenario_send, field, wip_file_router
+from app.routers import users, wips, projects, lantek, scenarios, scheduler, scenario_cart, scenario_send, field, wip_file
 from app.database import engine, async_session
 from app.models import Base
 from app.seed import seed_database
@@ -75,7 +76,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 # ---------------------------------------------------------
 
 app.include_router(users.router, prefix="/api/users", tags=["Users"])
-app.include_router(wip_file_router, prefix="/api/steelWip", tags=["steelWip"])
+app.include_router(wip_file.router, prefix="/api/steelWip", tags=["Steel WIP File"])
 app.include_router(wips.router, prefix="/api/steelWip", tags=["Steel WIPs"])
 app.include_router(projects.router, prefix="/api/project", tags=["Projects"])
 app.include_router(lantek.router, prefix="/api/lantek", tags=["Lantek"])
