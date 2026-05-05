@@ -81,11 +81,19 @@ def _parse_location(file_row: dict, loc_list) -> tuple[int | None, int | None]:
 
 
 def _extract_fields(file_row: dict, loc_list, db_wip: SteelWip) -> dict:
-    """업데이트용 — 위치 파싱 실패 시 기존 DB 값 유지"""
-    location_id, stack_level = _parse_location(file_row, loc_list)
-    if location_id is None:
-        location_id = db_wip.location_id
-        stack_level  = db_wip.stack_level
+    """업데이트용 — 위치가 빈칸이면 None으로 저장, 파싱 실패 시에만 DB 값 유지"""
+    raw = str(file_row.get("위치") or "").strip()
+
+    if raw == "":
+        # 파일에 위치가 명시적으로 비어 있음 → None으로 저장
+        location_id = None
+        stack_level = None
+    else:
+        location_id, stack_level = _parse_location(file_row, loc_list)
+        if location_id is None:
+            # 값은 있지만 파싱 실패 → 기존 DB 값 유지
+            location_id = db_wip.location_id
+            stack_level  = db_wip.stack_level
 
     return {
         "material":     str(file_row.get("재질") or "").strip() or None,
@@ -100,8 +108,13 @@ def _extract_fields(file_row: dict, loc_list, db_wip: SteelWip) -> dict:
 
 
 def _extract_fields_new(file_row: dict, loc_list) -> dict:
-    """신규 생성용 — DB WIP 없이 파일 값만으로 추출"""
-    location_id, stack_level = _parse_location(file_row, loc_list)
+    """신규 생성용 — 위치 빈칸이면 None으로 저장"""
+    raw = str(file_row.get("위치") or "").strip()
+    if raw == "":
+        location_id, stack_level = None, None
+    else:
+        location_id, stack_level = _parse_location(file_row, loc_list)
+        # 값은 있으나 파싱 실패해도 None으로 저장 (기존 DB 값 없음)
 
     return {
         "material":     str(file_row.get("재질") or "").strip() or None,
@@ -224,10 +237,13 @@ async def preview_wip_file(db: AsyncSession, filename: str, content: bytes) -> d
             if v is not None
         )
 
-        if is_same:
-            unchanged += 1
-            continue
+        ALWAYS_COMPARE_FIELDS = {"location_id", "stack_level"}  # None이어도 비교할 필드
 
+        is_same = all(
+            _eq(getattr(db_wip, k), v)
+            for k, v in update_fields.items()
+            if v is not None or k in ALWAYS_COMPARE_FIELDS
+        )
         to_update.append({
             "wip_id":  db_wip.id,
             "qr_code": qr_code_val,
@@ -284,11 +300,15 @@ async def confirm_wip_updates(
             })
             continue
 
-        for field, value in new_fields.items():
-            if value is not None and hasattr(db_wip, field):
-                setattr(db_wip, field, value)
+        NULLABLE_FIELDS = {"location_id", "stack_level", "manufacturer"}  # None 허용 필드
 
-        updated.append(wip_id)
+        for field, value in new_fields.items():
+            if not hasattr(db_wip, field):
+                continue
+            # None 허용 필드이거나 값이 있는 경우에만 반영
+            if value is not None or field in NULLABLE_FIELDS:
+                setattr(db_wip, field, value)
+                updated.append(wip_id)
 
     # 신규 생성
     created = []
