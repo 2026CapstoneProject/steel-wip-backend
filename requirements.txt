@@ -15,3 +15,4 @@ python-multipart==0.0.22
 pypdf==5.4.0
 greenlet==3.2.1
 Pillow==11.2.1
+openpyxl==3.1.5
