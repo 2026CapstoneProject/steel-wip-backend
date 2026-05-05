@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
+from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from typing import List
@@ -111,7 +111,7 @@ async def confirm_upload(
 
 @router.delete("/file")
 async def delete_wips_by_ids(
-    wip_ids: List[int],
+    wip_ids: List[int] = Query(...),
     db: AsyncSession = Depends(get_db),
 ):
     if not wip_ids:
