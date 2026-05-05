@@ -75,6 +75,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 # ---------------------------------------------------------
 
 app.include_router(users.router, prefix="/api/users", tags=["Users"])
+app.include_router(wip_file_router, prefix="/api/steelWip", tags=["steelWip"])
 app.include_router(wips.router, prefix="/api/steelWip", tags=["Steel WIPs"])
 app.include_router(projects.router, prefix="/api/project", tags=["Projects"])
 app.include_router(lantek.router, prefix="/api/lantek", tags=["Lantek"])
@@ -84,7 +85,6 @@ app.include_router(scenario_cart.router, prefix="/api/scenario_cart", tags=["Sce
 app.include_router(scenario_send.router, prefix="/api/scenario_send", tags=["Scenario Send"])
 app.include_router(field.router, prefix="/api/field", tags=["Field"])
 app.include_router(field.router, prefix="/api/live_field", tags=["Field Dashboard"])
-app.include_router(wip_file_router, prefix="/api/steelWip", tags=["steelWip"])
 @app.get("/")
 async def root():
     return {

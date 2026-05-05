@@ -15,11 +15,13 @@ EXPORT_COLUMNS = [
 ]
 
 
-def _build_row(wip) -> dict:
-    loc_name = wip.location.loc_name if wip.location else ""
-    stack = wip.stack_level if wip.stack_level is not None else ""
-    위치 = f"{loc_name}-{stack}" if loc_name and stack != "" else ""
-    qr_code = wip.qr.qr_code if wip.qr else ""
+def _build_row(wip: dict) -> dict:
+    loc_name = wip.get("location_name") or ""
+    stack = wip.get("stack_level")
+    위치 = f"{loc_name}-{stack}" if loc_name and stack is not None else ""
+    qr_code = wip.get("qr_code_value") or ""
+
+    weight = wip.get("weight") or ""
 
     return {
         "재고사업장":    "(주)유석철강 청주지점",
@@ -29,27 +31,27 @@ def _build_row(wip) -> dict:
         "등급":         "정상품",
         "품명":         "후판",
         "도료":         "없음",
-        "재질":         wip.material or "",
+        "재질":         wip.get("material") or "",
         "가로":         0,
         "세로":         0,
-        "두께":         wip.thickness or "",
-        "폭":           wip.width or "",
+        "두께":         wip.get("thickness") or "",
+        "폭":           wip.get("width") or "",
         "호칭경":       "",
-        "길이":         wip.length or "",
+        "길이":         wip.get("length") or "",
         "재고수량":     1,
-        "재고중량":     wip.weight or "",
+        "재고중량":     weight,
         "예약수량":     0,
         "예약중량":     0,
         "사용가능수량": 1,
-        "사용가능중량": wip.weight or "",
-        "제조사":       wip.manufacturer or "",
+        "사용가능중량": weight,
+        "제조사":       wip.get("manufacturer") or "",
         "소재번호":     qr_code,
         "입고일":       "",
         "보관일수":     "",
         "Bundle번호":   "",
         "LOT번호":      "",
         "재고구분":     "자사",
-        "단위중량":     wip.weight or "",
+        "단위중량":     weight,
         "단위":         "EA",
         "창고":         "Laser 창고(오창)",
         "적재위치":     "공통",
@@ -72,7 +74,6 @@ def _build_row(wip) -> dict:
         "Heat번호":     "",
         "PVC":          "",
     }
-
 
 async def export_wip_xlsx(db: AsyncSession) -> io.BytesIO:
     results = await get_filtered_wips(db=db)
