@@ -6,7 +6,7 @@ from app.schemas.enums import WipStatus
 
 class SteelWipBase(BaseModel):
     status: WipStatus = WipStatus.REGISTERED
-    manufacturer: str
+    manufacturer: Optional[str] = None
     material: str
     thickness: float
     width: float
