@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 import asyncio
 
-from app.routers import users, wips, projects, lantek, scenarios, scheduler, scenario_cart, scenario_send, field
+from app.routers import users, wips, projects, lantek, scenarios, scheduler, scenario_cart, scenario_send, field, wip_file_router
 from app.database import engine, async_session
 from app.models import Base
 from app.seed import seed_database
@@ -84,7 +84,7 @@ app.include_router(scenario_cart.router, prefix="/api/scenario_cart", tags=["Sce
 app.include_router(scenario_send.router, prefix="/api/scenario_send", tags=["Scenario Send"])
 app.include_router(field.router, prefix="/api/field", tags=["Field"])
 app.include_router(field.router, prefix="/api/live_field", tags=["Field Dashboard"])
-
+app.include_router(wip_file_router, prefix="/api/steelWip", tags=["steelWip"])
 @app.get("/")
 async def root():
     return {
