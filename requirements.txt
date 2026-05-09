@@ -16,5 +16,5 @@ pypdf==5.4.0
 greenlet==3.2.1
 Pillow==11.2.1
 openpyxl==3.1.5
-passlib[bcrypt]==1.7.4     # 비밀번호 bcrypt 해싱
-python-jose[cryptography]==3.3.0  # JWT 토큰 생성/검증
+bcrypt==4.2.1              # ← 최신 버전 직접 사용
+python-jose[cryptography]==3.3.0

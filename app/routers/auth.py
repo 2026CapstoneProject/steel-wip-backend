@@ -4,7 +4,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
 from pydantic import BaseModel
-from passlib.context import CryptContext
+import bcrypt
+
 from jose import jwt
 
 from app.database import async_session
@@ -19,7 +20,8 @@ SECRET_KEY = settings.JWT_SECRET_KEY
 ALGORITHM = settings.JWT_ALGORITHM
 ACCESS_TOKEN_EXPIRE_MINUTES = settings.JWT_EXPIRE_MINUTES
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+def verify_password(plain: str, hashed: str) -> bool:
+    return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
 
 # ─── DB 의존성 ────────────────────────────────────────────
 async def get_db():
@@ -50,7 +52,7 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
     user = result.scalar_one_or_none()
 
     # 2. 유저 없거나 비밀번호 불일치
-    if not user or not pwd_context.verify(body.password, user.password):
+    if not user or not verify_password(body.password, user.password):
         raise HTTPException(
             status_code=401,
             detail="아이디 또는 비밀번호가 올바르지 않습니다."

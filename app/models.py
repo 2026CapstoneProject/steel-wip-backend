@@ -115,8 +115,7 @@ class Users(Base):
     last_login_at: Mapped[Optional[datetime.datetime]] = mapped_column(TIMESTAMP, nullable=True)                 # ← 추가
 
     scenarios_assignee: Mapped[list['Scenarios']] = relationship('Scenarios', foreign_keys='[Scenarios.assignee_id]', back_populates='assignee')
-    scenarios_creator: Mapped[list['Scenarios']] = relationship('Scenarios', foreign_keys='[Scenarios.creator_id]', back_populates='scenarios_creator')
-
+    scenarios_creator: Mapped[list['Scenarios']] = relationship('Scenarios', foreign_keys='[Scenarios.creator_id]', back_populates='creator')
 class Scenarios(Base):
     __tablename__ = 'scenarios'
     __table_args__ = (
