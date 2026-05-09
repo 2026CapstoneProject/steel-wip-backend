@@ -19,6 +19,10 @@ from app.models import (
     EstimatedWips, LazerCutting, Batch, Scenarios
 )
 
+from passlib.context import CryptContext
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
 # CSV 파일들이 저장된 디렉토리 경로 (프로젝트 구조에 맞게 수정 가능)
 CSV_DIR = Path(__file__).resolve().parent.parent / "seed"
 
@@ -97,6 +101,7 @@ async def seed_database(db: AsyncSession) -> None:
         Users(
             id=int(row['id']),
             username=row['username'],
+            password=pwd_context.hash(row['password']),   # ← 평문을 bcrypt 해시로 변환
             department=row['department'],
             role=row['role'],
             user_num=int(row['user_num'])
