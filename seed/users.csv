@@ -1,3 +1,3 @@
-id,username,department,role,user_num
-1,积魂拌裙磊,积魂包府评,OFFICE,1
-2,LAZER1,积魂包府评,FIELD,3
+id,username,password,department,role,user_num
+1,积魂拌裙磊,office1234,积魂包府评,OFFICE,1
+2,LAZER1,field1234,积魂包府评,FIELD,3

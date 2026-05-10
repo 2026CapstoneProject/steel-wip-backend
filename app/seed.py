@@ -19,6 +19,11 @@ from app.models import (
     EstimatedWips, LazerCutting, Batch, Scenarios
 )
 
+import bcrypt
+
+def hash_password(plain: str) -> str:
+    return bcrypt.hashpw(plain.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
 # CSV 파일들이 저장된 디렉토리 경로 (프로젝트 구조에 맞게 수정 가능)
 CSV_DIR = Path(__file__).resolve().parent.parent / "seed"
 
@@ -97,6 +102,7 @@ async def seed_database(db: AsyncSession) -> None:
         Users(
             id=int(row['id']),
             username=row['username'],
+            password=hash_password(row['password']),   # pwd_context.hash() → hash_password()
             department=row['department'],
             role=row['role'],
             user_num=int(row['user_num'])

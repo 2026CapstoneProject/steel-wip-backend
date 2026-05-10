@@ -16,3 +16,5 @@ pypdf==5.4.0
 greenlet==3.2.1
 Pillow==11.2.1
 openpyxl==3.1.5
+bcrypt==4.2.1              # ← 최신 버전 직접 사용
+python-jose[cryptography]==3.3.0
