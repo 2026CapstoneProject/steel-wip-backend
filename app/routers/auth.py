@@ -11,6 +11,9 @@ from app.database import async_session
 from app.models import Users
 from app.core.config import settings
 
+import uuid
+from app.models import TokenBlacklist
+
 router = APIRouter()
 
 SECRET_KEY = settings.JWT_SECRET_KEY
@@ -35,9 +38,11 @@ class LoginResponse(BaseModel):
 
 def create_token(data: dict, expires_delta: timedelta) -> str:
     to_encode = data.copy()
-    to_encode.update({"exp": datetime.utcnow() + expires_delta})
+    to_encode.update({
+        "exp": datetime.utcnow() + expires_delta,
+        "jti": str(uuid.uuid4()),   # ← 토큰마다 고유 ID 부여
+    })
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-
 # ─── POST /api/auth/login ─────────────────────────────────
 @router.post("/login", response_model=LoginResponse)
 async def login(body: LoginRequest, response: Response, db: AsyncSession = Depends(get_db)):
@@ -98,6 +103,26 @@ async def refresh(refresh_token: Optional[str] = Cookie(default=None)):
 
 # ─── POST /api/auth/logout ────────────────────────────────
 @router.post("/logout")
-async def logout(response: Response):
-    response.delete_cookie("refresh_token")  # Cookie 삭제
+async def logout(
+    response: Response,
+    authorization: Optional[str] = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    # Refresh Token Cookie 삭제
+    response.delete_cookie("refresh_token")
+
+    # Access Token 블랙리스트 등록
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.split(" ")[1]
+        try:
+            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+            jti = payload.get("jti")
+            exp = payload.get("exp")
+            if jti and exp:
+                expired_at = datetime.utcfromtimestamp(exp)
+                db.add(TokenBlacklist(jti=jti, expired_at=expired_at))
+                await db.commit()
+        except JWTError:
+            pass  # 이미 만료된 토큰이면 무시
+
     return {"message": "로그아웃 되었습니다."}

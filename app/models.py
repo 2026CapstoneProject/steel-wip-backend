@@ -292,3 +292,12 @@ class EstimatedWips(Base):
 
     lazer_cutting: Mapped[Optional['LazerCutting']] = relationship('LazerCutting', back_populates='estimated_wips')
     qr: Mapped[Optional['QrCodes']] = relationship('QrCodes', back_populates='estimated_wips')
+
+class TokenBlacklist(Base):
+    __tablename__ = 'token_blacklist'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    jti: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)  # JWT ID
+    expired_at: Mapped[datetime.datetime] = mapped_column(TIMESTAMP, nullable=False)  # 토큰 만료시각
+    created_at: Mapped[Optional[datetime.datetime]] = mapped_column(TIMESTAMP, server_default=text('(now())'))
+    
