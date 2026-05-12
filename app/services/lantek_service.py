@@ -114,7 +114,7 @@ def _parse_layouts_from_text(text: str) -> list[ParsedLantekLayout]:
     """
     normalized = _normalize_pdf_text(text)
 
-    if "CUTTING PLAN" not in normalized and "cutting plan" not in normalized.lower():
+    if not re.search(r"O\d{4,6}", normalized) and "CNC" not in normalized and "CUTTING" not in normalized.upper():
         return []
 
     # ── NC코드 ──
@@ -131,14 +131,14 @@ def _parse_layouts_from_text(text: str) -> list[ParsedLantekLayout]:
 
     # ── 자재 정보: V2 포맷 우선 (cp3: "자재 20 Tx 6096 x 2438") ──
     material_info_match = re.search(
-        r"자재\s+([0-9.]+)\s*[Tt][xX]?\s*([0-9.]+)\s*[xX×]\s*([0-9.]+)",
+        r"자재\s+([0-9.]+)\s*[Tt]\s*[xX×]?\s*([0-9.]+)\s*[xX×]\s*([0-9.]+)",
         normalized,
     )
     if material_info_match:
         thickness = float(material_info_match.group(1))
         slab_width = float(material_info_match.group(2))
         slab_length = float(material_info_match.group(3))
-        material_match = re.search(r"재질\s+([A-Za-z0-9]+)", normalized)
+        material_match = re.search(r"재질\s*([A-Za-z][A-Za-z0-9]+)", normalized)
         material = material_match.group(1) if material_match else "UNKNOWN"
     else:
         # ── V1 압축 포맷 (cp1, cp2: "SM355A20243860966...") ──
@@ -316,26 +316,7 @@ async def _create_parsed_lantek_data(
                     weight=float(part["weight"]),
                 )
                 db.add(estimated_wip)
-        else:
-            # 단품 정보가 없으면 기존 방식(slab 크기 기반)으로 fallback
-            estimated_width = layout.output_width or layout.slab_width
-            estimated_length = layout.output_length or layout.slab_length
-            if estimated_width > 0 and estimated_length > 0:
-                qr_value = f"LANTEK-{scenario.id}-{index}-{layout.layout_name}"
-                qr_code = QrCodes(qr_code=qr_value)
-                db.add(qr_code)
-                await db.flush()
-                estimated_wip = EstimatedWips(
-                    lazer_cutting_id=cutting.id,
-                    qr_id=qr_code.id,
-                    manufacturer=target_wip.manufacturer or "POSCO",
-                    material=layout.material,
-                    thickness=layout.thickness,
-                    width=estimated_width,
-                    length=estimated_length,
-                    weight=_calculate_weight(layout.thickness, estimated_width, estimated_length),
-                )
-                db.add(estimated_wip)
+
 
 
 def _extract_planned_wip_id_from_qr(qr_code: str | None) -> int | None:
