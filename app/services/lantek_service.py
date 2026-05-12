@@ -287,7 +287,10 @@ async def _create_parsed_lantek_data(
             priority="LOW",
             estimated_cutting_time=layout.estimated_minutes,
             steel_wip_id=target_wip.id,
-            nc_code=layout.nc_code,   # ← nc_code 저장
+            nc_code=layout.nc_code,
+            input_material=layout.material,        # ← 추가
+            input_width=layout.input_width,        # ← 추가
+            input_length=layout.input_length,      # ← 추가
         )
         db.add(cutting)
         await db.flush()
@@ -709,8 +712,18 @@ async def get_lantek_data(db: AsyncSession, scenario_id: int) -> list:
         time_str = f"{hours:02d}:{mins:02d}"
 
         source_wip = await db.get(SteelWip, cut.steel_wip_id) if cut.steel_wip_id else None
-        input_width = float(source_wip.width) if source_wip else 0.0
-        input_height = float(source_wip.length) if source_wip else 0.0
+
+        # PDF 파싱값이 있으면 우선 사용, 없으면 source_wip fallback
+        if cut.input_width and cut.input_length:
+            input_width = float(cut.input_width)
+            input_height = float(cut.input_length)
+            input_material = cut.input_material or (source_wip.material if source_wip else "SM355A")
+            input_thickness = source_wip.thickness if source_wip else 0.0
+        else:
+            input_width = float(source_wip.width) if source_wip else 0.0
+            input_height = float(source_wip.length) if source_wip else 0.0
+            input_material = source_wip.material if source_wip else "SM355A"
+            input_thickness = source_wip.thickness if source_wip else 0.0
 
         lazer_cutting_list.append(
             LantekCutting(
@@ -720,12 +733,12 @@ async def get_lantek_data(db: AsyncSession, scenario_id: int) -> list:
                 plannedSourceWipId=None,
                 estimatedCuttingTime=time_str,
                 input=LantekInput(
-                    manufacturer=source_wip.manufacturer if source_wip else "POSCO",
-                    material=source_wip.material if source_wip else "SM355A",
-                    thickness=source_wip.thickness if source_wip else 0.0,
+                    manufacturer="",                                              # ← 공란 (PDF에 없음)
+                    material=input_material,
+                    thickness=input_thickness,
                     width=input_width,
                     height=input_height,
-                    materialType=_determine_material_type(input_width, input_height),  # ← 추가
+                    materialType=_determine_material_type(input_width, input_height),
                 ),
                 estimatedWips=estimated_wips_mapped,
             )
