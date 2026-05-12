@@ -264,6 +264,8 @@ class LazerCutting(Base):
     status: Mapped[Optional[LazerCuttingStatus]] = mapped_column(Enum(LazerCuttingStatus, values_callable=lambda cls: [member.value for member in cls]), server_default=text("'PENDING'"))
     steel_wip_id: Mapped[Optional[int]] = mapped_column(Integer)
     batch_id: Mapped[Optional[int]] = mapped_column(Integer)
+    
+    nc_code: Mapped[Optional[str]] = mapped_column(String(255))
 
     batch: Mapped[Optional['Batch']] = relationship('Batch', back_populates='lazer_cutting')
     scenario: Mapped[Optional['Scenarios']] = relationship('Scenarios', back_populates='lazer_cutting')
