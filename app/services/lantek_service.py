@@ -591,7 +591,7 @@ async def create_dummy_lantek_data(
     if not scenario:
         raise ValueError("시나리오를 찾을 수 없습니다.")
 
-    scenario.status = "DRAFT"
+    scenario.status = "LANTEK_IMPORTED"
 
     parsed_layouts: list[ParsedLantekLayout] = []
     if file_bytes:
@@ -618,7 +618,7 @@ async def create_lantek_data_from_pdfs(
     if not scenario:
         raise ValueError("시나리오를 찾을 수 없습니다.")
 
-    scenario.status = "DRAFT"
+    scenario.status = "LANTEK_IMPORTED"
 
     all_layouts: list[ParsedLantekLayout] = []
     for file_info in files_data:

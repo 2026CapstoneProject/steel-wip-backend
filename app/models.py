@@ -44,6 +44,7 @@ class ScenariosLazerName(str, enum.Enum):
 
 
 class ScenariosStatus(str, enum.Enum):
+    LANTEK_IMPORTED = 'LANTEK_IMPORTED' 
     DRAFT = 'DRAFT'
     ORDERED = 'ORDERED'
     IN_PROGRESS = 'IN_PROGRESS'
