@@ -499,7 +499,7 @@ async def get_sent_scenario_history(
     stmt = (
         select(Scenarios, Projects)
         .join(Projects, Scenarios.project_id == Projects.id)
-        .where(Scenarios.status != "DRAFT")
+        .where(Scenarios.status.notin_(["DRAFT", "LANTEK_IMPORTED", None]))
     )
     
     # 2. 동적 필터링 적용
