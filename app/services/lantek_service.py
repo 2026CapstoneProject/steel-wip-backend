@@ -108,114 +108,89 @@ def _extract_pdf_text(file_bytes: bytes) -> str:
 def _parse_layouts_from_text(text: str) -> list[ParsedLantekLayout]:
     """
     실제 LANTEK CUTTING PLAN PDF 포맷 파싱.
-    PDF 1장 = 판재(자재) 1개에 해당.
+    PDF 1장 = 판재(자재) 1개. 섹션 분리 없이 전체 텍스트를 하나의 레이아웃으로 파싱.
     """
     normalized = _normalize_pdf_text(text)
-    layouts: list[ParsedLantekLayout] = []
 
-    # 페이지 단위로 분리 (단일 PDF에 여러 페이지가 있을 경우 대비)
-    # 하지만 PDF 1장 = 판재 1개이므로 전체 텍스트를 하나의 레이아웃으로 파싱
-    sections = re.split(r"Powered by LANTEK", normalized, flags=re.IGNORECASE)
+    if "CUTTING PLAN" not in normalized and "cutting plan" not in normalized.lower():
+        return []
 
-    for section in sections:
-        if "CUTTING PLAN" not in section and "cutting plan" not in section.lower():
-            continue
+    # ── NC코드 ──
+    nc_code_match = re.search(r"(O\d{4,6})", normalized)
+    nc_code = nc_code_match.group(1).strip() if nc_code_match else None
 
-        # ── 자재 정보: "자재 | 20 Tx 6096 x 2438" 형식 파싱 ──
-        # 두께T × 폭 × 길이
-        material_info_match = re.search(
-            r"자재\s+([0-9.]+)\s*[Tt][xX]?\s*([0-9.]+)\s*[xX×]\s*([0-9.]+)",
-            section,
-        )
-        if not material_info_match:
-            continue
+    # ── 절단예상시간 ──
+    time_match = re.search(r"(\d{1,2}):(\d{2}):(\d{2})(?:\.\d+)?", normalized)
+    estimated_minutes = (
+        int(time_match.group(1)) * 60 + int(time_match.group(2))
+        if time_match else 1
+    )
+    estimated_minutes = max(1, estimated_minutes)
+
+    # ── 자재 정보: V2 포맷 우선 (cp3: "자재 20 Tx 6096 x 2438") ──
+    material_info_match = re.search(
+        r"자재\s+([0-9.]+)\s*[Tt][xX]?\s*([0-9.]+)\s*[xX×]\s*([0-9.]+)",
+        normalized,
+    )
+    if material_info_match:
         thickness = float(material_info_match.group(1))
         slab_width = float(material_info_match.group(2))
         slab_length = float(material_info_match.group(3))
-
-        # ── 재질 ──
-        material_match = re.search(r"재질\s+([A-Za-z0-9]+)", section)
+        material_match = re.search(r"재질\s+([A-Za-z0-9]+)", normalized)
         material = material_match.group(1) if material_match else "UNKNOWN"
-
-        # ── CNC 프로그램 번호: "CNC 프로그램 번호" 라벨 이후 첫 번째 숫자/영숫자 토큰 ──
-        nc_code_match = re.search(
-            r"CNC\s*프로그램\s*번호.*?(?:날짜.*?)?[\n\r]+\s*([A-Za-z0-9]+)",
-            section,
-            flags=re.DOTALL,
+    else:
+        # ── V1 압축 포맷 (cp1, cp2: "SM355A20243860966...") ──
+        v1_match = re.search(
+            r"(S[A-Z]\d{3}[A-Z]?)\s*(\d{2})\s*(2438|6096|12192)\s*(2438|6096|12192)",
+            normalized,
         )
-        # 대안 패턴: 같은 줄 혹은 인접 셀에 있는 경우
-        if not nc_code_match:
-            nc_code_match = re.search(
-                r"CNC\s*프로그램\s*번호[^\n]*\n[^\n]*?(O?\d{4,6})",
-                section,
-            )
-        nc_code = nc_code_match.group(1).strip() if nc_code_match else None
+        if not v1_match:
+            return []
+        material = v1_match.group(1)
+        thickness = float(v1_match.group(2))
+        slab_width = float(v1_match.group(3))
+        slab_length = float(v1_match.group(4))
 
-        # ── 절단예상시간: "HH:MM:SS.xx" 형식 ──
-        time_match = re.search(
-            r"(\d{1,2}):(\d{2}):(\d{2})(?:\.\d+)?",
-            section,
+    # ── 오더명 ──
+    order_match = re.search(r"오더\s+(?:\d+\s+)?(.+?)(?:\s+\d{3,}|\s*\||\n)", normalized)
+    order_name = order_match.group(1).strip() if order_match else None
+
+    # ── 단품 테이블 파싱: 단품명이 "재공품"이고 QR코드가 있는 행만 파싱 ──
+    output_parts = []
+    table_match = re.search(
+        r"No\.\s+단\s*품\s*명.*",
+        normalized,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    if table_match:
+        table_text = table_match.group(0)
+        row_pattern = re.compile(
+            r"\d+\s+재공품\s+(QR[A-Za-z0-9]+)\s+(\d+)\s+(\d+)\s+([0-9.]+)\s+[0-9.]+\s+[0-9.]+\s+(\d+)\s*[xX×]\s*(\d+)"
         )
-        if time_match:
-            estimated_minutes = (
-                int(time_match.group(1)) * 60 + int(time_match.group(2))
-            )
-            estimated_minutes = max(1, estimated_minutes)
-        else:
-            estimated_minutes = 1
+        for row_match in row_pattern.finditer(table_text):
+            output_parts.append({
+                "name": "재공품",
+                "qr_code": row_match.group(1).strip(),
+                "width": float(row_match.group(5)),
+                "height": float(row_match.group(6)),
+                "weight": float(row_match.group(4)),
+            })
 
-        # ── 오더명 ──
-        order_match = re.search(r"오더\s+(?:\d+\s+)?(.+?)(?:\s+\d{3,}|\s*\||\n)", section)
-        order_name = order_match.group(1).strip() if order_match else None
-
-        # ── 단품 테이블 파싱 (발생 재공품 포함) ──
-        # 헤더: No. | 단 품 명 | QR코드 | 총수량 | 배열수 | 단품중량 | ... | 단품 치수
-        # 재공품 행: "5 | 재공품 | QR0429 | 1 | ..."
-        # 일반 부품 행: "5 | A-PLATE 2 | - | 500 | ..."
-        output_parts = []
-        # 테이블 영역 추출 (No. 이후 데이터)
-        table_match = re.search(
-            r"No\.\s+단\s*품\s*명.*?(?=Powered by LANTEK|\Z)",
-            section,
-            flags=re.DOTALL | re.IGNORECASE,
+    return [
+        ParsedLantekLayout(
+            layout_name=nc_code or "layout-1",
+            slab_width=slab_width,
+            slab_length=slab_length,
+            plate_width=slab_width,
+            plate_length=slab_length,
+            thickness=thickness,
+            material=material,
+            estimated_minutes=estimated_minutes,
+            nc_code=nc_code,
+            order_name=order_name,
+            output_parts=output_parts,
         )
-        if table_match:
-            table_text = table_match.group(0)
-            # 각 행 파싱: No.(숫자) 로 시작하는 행
-            row_pattern = re.compile(
-                r"(\d+)\s+(.+?)\s+(QR[A-Za-z0-9]+|-)\s+(\d+)\s+(\d+)\s+([0-9.]+)\s+[0-9.]+\s+[0-9.]+\s+([0-9]+)\s*[xX×]\s*([0-9]+)",
-            )
-            for row_match in row_pattern.finditer(table_text):
-                part_name = row_match.group(2).strip()
-                qr_val = row_match.group(3).strip()
-                part_weight = float(row_match.group(6))
-                part_width = float(row_match.group(7))
-                part_height = float(row_match.group(8))
-                output_parts.append({
-                    "name": part_name,
-                    "qr_code": qr_val if qr_val != "-" else None,
-                    "width": part_width,
-                    "height": part_height,
-                    "weight": part_weight,
-                })
-
-        layouts.append(
-            ParsedLantekLayout(
-                layout_name=nc_code or f"layout-{len(layouts) + 1}",
-                slab_width=slab_width,
-                slab_length=slab_length,
-                plate_width=slab_width,
-                plate_length=slab_length,
-                thickness=thickness,
-                material=material,
-                estimated_minutes=estimated_minutes,
-                nc_code=nc_code,
-                order_name=order_name,
-                output_parts=output_parts,
-            )
-        )
-
-    return layouts
+    ]
 
 def _calculate_weight(thickness: float, width: float, length: float) -> float:
     return round(thickness * width * length * STEEL_DENSITY, 1)
