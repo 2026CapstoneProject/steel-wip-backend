@@ -44,6 +44,7 @@ class ScenariosLazerName(str, enum.Enum):
 
 
 class ScenariosStatus(str, enum.Enum):
+    LANTEK_IMPORTED = 'LANTEK_IMPORTED' 
     DRAFT = 'DRAFT'
     ORDERED = 'ORDERED'
     IN_PROGRESS = 'IN_PROGRESS'
@@ -264,6 +265,11 @@ class LazerCutting(Base):
     status: Mapped[Optional[LazerCuttingStatus]] = mapped_column(Enum(LazerCuttingStatus, values_callable=lambda cls: [member.value for member in cls]), server_default=text("'PENDING'"))
     steel_wip_id: Mapped[Optional[int]] = mapped_column(Integer)
     batch_id: Mapped[Optional[int]] = mapped_column(Integer)
+    
+    nc_code: Mapped[Optional[str]] = mapped_column(String(255))
+    input_material: Mapped[Optional[str]] = mapped_column(String(255))   # 판재 재질
+    input_width: Mapped[Optional[float]] = mapped_column(Float)           # 판재 폭 (PDF 파싱값)
+    input_length: Mapped[Optional[float]] = mapped_column(Float)          # 판재 길이 (PDF 파싱값)
 
     batch: Mapped[Optional['Batch']] = relationship('Batch', back_populates='lazer_cutting')
     scenario: Mapped[Optional['Scenarios']] = relationship('Scenarios', back_populates='lazer_cutting')
