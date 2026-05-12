@@ -45,8 +45,6 @@ class ParsedLantekLayout:
     slab_length: float
     plate_width: float
     plate_length: float
-    input_width: float = 0.0    # ← 추가: input에 표시될 판재 폭
-    input_length: float = 0.0   # ← 추가: input에 표시될 판재 길이
     thickness: float
     material: str
     estimated_minutes: int
@@ -58,6 +56,8 @@ class ParsedLantekLayout:
     output_width: float | None = None
     output_length: float | None = None
     output_parts: list | None = None    # ← 추가 (단품 리스트: [{name, qr_code, width, height, weight}])
+    input_width: float = 0.0    # ← 추가: input에 표시될 판재 폭
+    input_length: float = 0.0   # ← 추가: input에 표시될 판재 길이
 
 DEMO_IMPORT_JOBS = [
     {
