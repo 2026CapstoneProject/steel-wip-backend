@@ -45,6 +45,8 @@ class ParsedLantekLayout:
     slab_length: float
     plate_width: float
     plate_length: float
+    input_width: float = 0.0    # ← 추가: input에 표시될 판재 폭
+    input_length: float = 0.0   # ← 추가: input에 표시될 판재 길이
     thickness: float
     material: str
     estimated_minutes: int
@@ -165,7 +167,7 @@ def _parse_layouts_from_text(text: str) -> list[ParsedLantekLayout]:
     if table_match:
         table_text = table_match.group(0)
         row_pattern = re.compile(
-            r"\d+\s+재공품\s+(QR[A-Za-z0-9]+)\s+(\d+)\s+(\d+)\s+([0-9.]+)\s+[0-9.]+\s+[0-9.]+\s+(\d+)\s*[xX×]\s*(\d+)"
+            r"\d+\s+재공품\s+(\S+)\s+(\d+)\s+(\d+)\s+([0-9.]+)\s+[0-9.]+\s+[0-9.]+\s+(\d+)\s*[xX×]\s*(\d+)"
         )
         for row_match in row_pattern.finditer(table_text):
             output_parts.append({
@@ -183,6 +185,8 @@ def _parse_layouts_from_text(text: str) -> list[ParsedLantekLayout]:
             slab_length=slab_length,
             plate_width=slab_width,
             plate_length=slab_length,
+            input_width=slab_width,    # ← 추가
+            input_length=slab_length,  # ← 추가
             thickness=thickness,
             material=material,
             estimated_minutes=estimated_minutes,
