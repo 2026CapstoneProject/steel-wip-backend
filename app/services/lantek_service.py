@@ -316,16 +316,16 @@ async def _create_parsed_lantek_data(
         # 단품 테이블에서 파싱된 재공품만 EstimatedWips로 저장
         if layout.output_parts:
             for part in layout.output_parts:
-                # QR코드가 있는 경우 (재공품)
-                qr_code_obj = None
-                if part["qr_code"]:
-                    qr_code_obj = QrCodes(qr_code=part["qr_code"])
-                    db.add(qr_code_obj)
-                    await db.flush()
+                if not part["qr_code"]:   # ← QR코드 없으면 skip (일반 단품)
+                    continue
+
+                qr_code_obj = QrCodes(qr_code=part["qr_code"])
+                db.add(qr_code_obj)
+                await db.flush()
 
                 estimated_wip = EstimatedWips(
                     lazer_cutting_id=cutting.id,
-                    qr_id=qr_code_obj.id if qr_code_obj else None,
+                    qr_id=qr_code_obj.id,
                     manufacturer=target_wip.manufacturer or "POSCO",
                     material=layout.material,
                     thickness=layout.thickness,
