@@ -26,13 +26,7 @@ from app.schemas.scenario import ScenarioHistoryItem, ProjectScenarioHistory, Se
 from app.schemas.batch_item import BatchItemStatus
 from app.schemas.wip import WipStatus
 from app.services.lantek_service import ensure_scenario_execution_plan
-from app.services.demo_solver_service import (
-    DEMO_SOLVER_SUMMARY,
-    DEMO_JOB_SCHEDULE,
-    DEMO_CRANE_SCHEDULE,
-    load_demo_production_plan_specs,
-    matches_demo_solver_result,
-)
+
 
 async def get_or_create_scenario(db: AsyncSession, project_id: int, scenario_due: date) -> Scenarios:
     """
@@ -129,7 +123,6 @@ async def get_scenario_result(db: AsyncSession, scenario_id: int) -> list:
     total_move_num = 0
 
     items_result = []
-    production_plan_specs = load_demo_production_plan_specs()
     wip_detail_map: dict[int, dict] = {}
     if batch_ids:
         items_stmt = (
@@ -146,7 +139,6 @@ async def get_scenario_result(db: AsyncSession, scenario_id: int) -> list:
 
             # WIP 정보
             wip = await db.get(SteelWip, item.steel_wip_id) if item.steel_wip_id else None
-            production_plan_spec = production_plan_specs.get(item.steel_wip_id)
             qr_code = await db.get(QrCodes, wip.qr_id) if wip and wip.qr_id else None
             
             # Location 명칭 치환
@@ -161,10 +153,10 @@ async def get_scenario_result(db: AsyncSession, scenario_id: int) -> list:
                 steelWipId=item.steel_wip_id or (wip.id if wip else 0),
                 qrCode=(qr_code.qr_code if qr_code and qr_code.qr_code else None),
                 manufacturer=wip.manufacturer if wip else "알수없음",
-                material=(production_plan_spec.material if production_plan_spec else (wip.material if wip else "알수없음")),
-                thickness=(production_plan_spec.thickness if production_plan_spec else (wip.thickness if wip else 0.0)),
-                width=(production_plan_spec.width if production_plan_spec else (wip.width if wip else 0.0)),
-                length=(production_plan_spec.length if production_plan_spec else (wip.length if wip else 0.0)),
+                material=wip.material if wip else "알수없음",       # ← production_plan_spec 제거
+                thickness=wip.thickness if wip else 0.0,            # ← production_plan_spec 제거
+                width=wip.width if wip else 0.0,                    # ← production_plan_spec 제거
+                length=wip.length if wip else 0.0,                  # ← production_plan_spec 제거
                 weight=wip.weight if wip else 0.0,
                 fromLocation=from_loc.loc_name if from_loc else None,
                 toLocation=to_loc.loc_name if to_loc else None,
@@ -179,68 +171,6 @@ async def get_scenario_result(db: AsyncSession, scenario_id: int) -> list:
                     "length": production_plan_spec.length if production_plan_spec else (wip.length if wip else None),
                 }
 
-    if matches_demo_solver_result(items_result, cuttings):
-        for steel_wip_id, detail in {
-            spec.steel_wip_id: spec for spec in production_plan_specs.values()
-        }.items():
-            existing = wip_detail_map.get(steel_wip_id, {})
-            if not existing.get("qrCode"):
-                wip = await db.get(SteelWip, steel_wip_id)
-                qr_code = await db.get(QrCodes, wip.qr_id) if wip and wip.qr_id else None
-                existing["qrCode"] = qr_code.qr_code if qr_code and qr_code.qr_code else None
-            existing["thickness"] = detail.thickness
-            existing["width"] = detail.width
-            existing["length"] = detail.length
-            wip_detail_map[steel_wip_id] = existing
-
-    solver_summary = None
-    job_schedule: list[ScenarioJobScheduleItem] = []
-    crane_schedule: list[ScenarioCraneScheduleItem] = []
-    total_crane_move = total_move_num + total_wip_num
-
-    is_demo_solver_result = matches_demo_solver_result(items_result, cuttings)
-
-    if is_demo_solver_result:
-        solver_summary = ScenarioSolverSummary(
-            status=DEMO_SOLVER_SUMMARY["status"],
-            objective=DEMO_SOLVER_SUMMARY["objective"],
-            mipGap=DEMO_SOLVER_SUMMARY["mipGap"],
-            solutions=DEMO_SOLVER_SUMMARY["solutions"],
-            solveSeconds=DEMO_SOLVER_SUMMARY["solveSeconds"],
-            makespanMinutes=DEMO_SOLVER_SUMMARY["makespanMinutes"],
-        )
-        job_schedule = [
-            ScenarioJobScheduleItem(
-                jobName=job.job_name,
-                sequence=job.sequence,
-                startMinute=job.start_minute,
-                endMinute=job.end_minute,
-                pickWips=job.pick_wips,
-                outputWips=job.output_wips,
-            )
-            for job in DEMO_JOB_SCHEDULE
-        ]
-        crane_schedule = [
-            ScenarioCraneScheduleItem(
-                order=row.order,
-                action=row.action,
-                steelWipId=row.steel_wip_id,
-                qrCode=(wip_detail_map.get(row.steel_wip_id) or {}).get("qrCode"),
-                thickness=(wip_detail_map.get(row.steel_wip_id) or {}).get("thickness"),
-                width=(wip_detail_map.get(row.steel_wip_id) or {}).get("width"),
-                length=(wip_detail_map.get(row.steel_wip_id) or {}).get("length"),
-                fromLocation=row.from_location,
-                toLocation=row.to_location,
-                eventMinute=row.event_minute,
-                moveType=row.move_type,
-            )
-            for row in DEMO_CRANE_SCHEDULE
-        ]
-        total_wip_num = sum(len(job.output_wips) for job in DEMO_JOB_SCHEDULE)
-        total_crane_move = len(DEMO_CRANE_SCHEDULE)
-        total_move_num = DEMO_SOLVER_SUMMARY["objective"]
-        total_cutting_time = round(DEMO_SOLVER_SUMMARY["makespanMinutes"])
-
     result_data = ScenarioResultData(
         projectId=project.id,
         projectTitle=project.title,
@@ -253,9 +183,9 @@ async def get_scenario_result(db: AsyncSession, scenario_id: int) -> list:
         totalCraneMove=total_crane_move,
         totalMoveNum=total_move_num,
         batchItems=batch_items,
-        solverSummary=solver_summary,
-        jobSchedule=job_schedule,
-        craneSchedule=crane_schedule,
+        solverSummary=None,
+        jobSchedule=[],
+        craneSchedule=[],
     )
     
     return [result_data]
