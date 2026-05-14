@@ -1,6 +1,6 @@
 # app/algorithms/dummy_optimizer.py
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_, delete
+from sqlalchemy import select, and_, delete, update
 from typing import List
 import random
 
@@ -41,9 +41,16 @@ async def run_asis_optimization(db: AsyncSession, scenario_id: int):
     ).scalars().all()
 
     if existing_batch_ids:
+        # 1) BatchItems 먼저 삭제
         await db.execute(delete(BatchItems).where(BatchItems.batch_id.in_(existing_batch_ids)))
+        # 2) lazer_cutting.batch_id FK 해제 (NULL로)
+        await db.execute(
+            update(LazerCutting)
+            .where(LazerCutting.batch_id.in_(existing_batch_ids))
+            .values(batch_id=None)
+        )
+        # 3) Batch 삭제
         await db.execute(delete(Batch).where(Batch.id.in_(existing_batch_ids)))
-
     # ── 기존 EstimatedWips에서 REGISTERED 상태로 생성된 SteelWip 삭제 ──
     cutting_ids = (
         await db.execute(select(LazerCutting.id).where(LazerCutting.scenario_id == scenario_id))
