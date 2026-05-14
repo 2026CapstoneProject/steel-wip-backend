@@ -59,39 +59,6 @@ class ParsedLantekLayout:
     input_width: float = 0.0    # ← 추가: input에 표시될 판재 폭
     input_length: float = 0.0   # ← 추가: input에 표시될 판재 길이
 
-DEMO_IMPORT_JOBS = [
-    {
-        "jobName": "Job1",
-        "plannedSourceWipId": 0,
-        "plannedOutputWipId": 0,
-        "material": "SM355A",
-        "thickness": 12.0,
-        "width": 2438.0,
-        "height": 6096.0,
-        "estimatedMinutes": 241,
-    },
-    {
-        "jobName": "Job2",
-        "plannedSourceWipId": 28,
-        "plannedOutputWipId": 103,
-        "material": "SM355A",
-        "thickness": 12.0,
-        "width": 950.0,
-        "height": 2530.0,
-        "estimatedMinutes": 10,
-    },
-    {
-        "jobName": "Job3",
-        "plannedSourceWipId": 99,
-        "plannedOutputWipId": 104,
-        "material": "SS275",
-        "thickness": 20.0,
-        "width": 570.0,
-        "height": 2450.0,
-        "estimatedMinutes": 4,
-    },
-]
-
 
 def _normalize_pdf_text(text: str) -> str:
     return (
@@ -220,44 +187,13 @@ def _pick_matching_wip(
             ),
             None,
         )
-        fallback_match = next(
-            (
-                wip
-                for wip in available
-                if wip.material == layout.material
-                and float(wip.thickness or 0) == layout.thickness
-            ),
-            None,
-        )
-        reused_exact_match = next(
-            (
-                wip
-                for wip in all_stock
-                if wip.material == layout.material
-                and float(wip.thickness or 0) == layout.thickness
-                and float(wip.width or 0) >= layout.plate_width
-                and float(wip.length or 0) >= layout.plate_length
-            ),
-            None,
-        )
-        reused_fallback_match = next(
-            (
-                wip
-                for wip in all_stock
-                if wip.material == layout.material
-                and float(wip.thickness or 0) == layout.thickness
-            ),
-            None,
-        )
-        selected = (
-            exact_match
-            or fallback_match
-            or reused_exact_match
-            or reused_fallback_match
-            or (all_stock[0] if all_stock else None)
-        )
+        # 수정 후 - _pick_matching_wip 내부
+        selected = exact_match  # 정확한 매칭만 허용
         if selected is None:
-            raise ValueError("LANTEK 결과를 배정할 가용 가능한 재고(IN_STOCK)가 부족합니다.")
+            raise ValueError(
+                f"PDF에서 인식한 자재({layout.material} {layout.thickness}T "
+                f"{layout.plate_width}x{layout.plate_length})에 매칭되는 재고를 DB에서 찾을 수 없습니다."
+            )
         if selected in available:
             available.remove(selected)
         assignments.append((layout, selected))
@@ -368,21 +304,6 @@ def _extract_planned_wip_id_from_qr(qr_code: str | None) -> int | None:
         return None
     match = re.search(r"(?:DEMO-WIP-|QR-DEMO-)([0-9]+)", qr_code)
     return int(match.group(1)) if match else None
-
-
-def _get_demo_import_job_metadata(cuttings: list[LazerCutting], cut_index: int) -> dict | None:
-    if len(cuttings) != len(DEMO_IMPORT_JOBS):
-        return None
-
-    expected_minutes = [job["estimatedMinutes"] for job in DEMO_IMPORT_JOBS]
-    actual_minutes = [cut.estimated_cutting_time or 0 for cut in cuttings]
-    if actual_minutes != expected_minutes:
-        return None
-
-    if 0 <= cut_index < len(DEMO_IMPORT_JOBS):
-        return DEMO_IMPORT_JOBS[cut_index]
-
-    return None
 
 
 async def clear_scenario_execution_plan(db: AsyncSession, scenario_id: int) -> None:
@@ -559,81 +480,6 @@ async def ensure_scenario_execution_plan(
     return True
 
 
-async def _create_fallback_dummy_lantek_data(db: AsyncSession, scenario_id: int) -> None:
-    stmt = select(SteelWip).where(SteelWip.status == WipStatus.IN_STOCK.value).limit(50)
-    wip_result = await db.execute(stmt)
-    real_wips = wip_result.scalars().all()
-
-    if not real_wips:
-        raise ValueError("가용 가능한 재고(IN_STOCK)가 존재하지 않습니다.")
-
-    total_cuttings = 12
-
-    for _ in range(total_cuttings):
-        target_wip = random.choice(real_wips)
-        if target_wip.status != WipStatus.IN_STOCK.value:
-            await db.rollback()
-            raise ValueError(f"WIP ID {target_wip.id}는 이미 할당된 재고입니다.")
-
-        cutting_time = random.randint(15, 120)
-        cutting = LazerCutting(
-            scenario_id=scenario_id,
-            status="PENDING",
-            priority=random.choice(["LOW", "MIDDLE", "HIGH"]),
-            estimated_cutting_time=cutting_time,
-            steel_wip_id=target_wip.id,
-        )
-        db.add(cutting)
-        await db.flush()
-
-        for _ in range(random.choice([0, 1, 2])):
-            new_width = round(target_wip.width * random.uniform(0.3, 0.7), 1)
-            new_length = round(target_wip.length * random.uniform(0.3, 0.7), 1)
-            qr_code = QrCodes(qr_code=f"QR-DUMMY-{cutting.id}-{random.randint(1000, 9999)}")
-            db.add(qr_code)
-            await db.flush()
-            db.add(
-                EstimatedWips(
-                    lazer_cutting_id=cutting.id,
-                    manufacturer=target_wip.manufacturer or "POSCO",
-                    material=target_wip.material,
-                    thickness=target_wip.thickness,
-                    width=new_width,
-                    length=new_length,
-                    weight=_calculate_weight(target_wip.thickness, new_width, new_length),
-                    qr_id=qr_code.id,
-                )
-            )
-
-
-async def create_dummy_lantek_data(
-    db: AsyncSession,
-    scenario_id: int,
-    file_bytes: bytes | None = None,
-    filename: str | None = None,
-) -> None:
-    scenario = await db.get(Scenarios, scenario_id)
-    if not scenario:
-        raise ValueError("시나리오를 찾을 수 없습니다.")
-
-    scenario.status = "LANTEK_IMPORTED"
-
-    parsed_layouts: list[ParsedLantekLayout] = []
-    if file_bytes:
-        try:
-            parsed_layouts = _parse_layouts_from_text(_extract_pdf_text(file_bytes))
-        except Exception:
-            parsed_layouts = []
-
-    if parsed_layouts:
-        await _create_parsed_lantek_data(db, scenario, parsed_layouts)
-    else:
-        await _create_fallback_dummy_lantek_data(db, scenario_id)
-
-    await ensure_scenario_execution_plan(db, scenario_id, replace_existing=True)
-
-    await db.commit()
-
 async def create_lantek_data_from_pdfs(
     db: AsyncSession,
     scenario_id: int,
@@ -654,10 +500,12 @@ async def create_lantek_data_from_pdfs(
         except Exception:
             pass  # 파싱 실패 PDF는 스킵
 
-    if all_layouts:
-        await _create_parsed_lantek_data(db, scenario, all_layouts)
-    else:
-        await _create_fallback_dummy_lantek_data(db, scenario_id)
+    if not all_layouts:
+        raise ValueError(
+            "PDF에서 LANTEK 데이터를 인식하지 못했습니다. "
+            "올바른 LANTEK CUTTING PLAN PDF인지 확인해주세요."
+        )
+    await _create_parsed_lantek_data(db, scenario, all_layouts)
 
     await ensure_scenario_execution_plan(db, scenario_id, replace_existing=True)
     await db.commit()
@@ -691,7 +539,6 @@ async def get_lantek_data(db: AsyncSession, scenario_id: int) -> list:
             .order_by(EstimatedWips.id.asc())
         )
         wips = (await db.execute(wips_stmt)).scalars().all()
-        demo_job = _get_demo_import_job_metadata(cuttings, cut_index)
 
         estimated_wips_mapped: list[LantekEstimatedWip] = []
         for w in wips:
