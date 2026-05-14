@@ -10,7 +10,6 @@ from app.models import (
 )
 from app.schemas.enums import BatchActionType, BatchItemStatus, WipStatus
 
-# 원자재 판별 기준: (width, length) 쌍 (float → int 변환 후 비교)
 RAW_MATERIAL_SIZES = {
     (2438, 6096),
     (2437, 12192),
@@ -19,7 +18,6 @@ RAW_MATERIAL_SIZES = {
 }
 
 def is_raw_material(wip: SteelWip) -> bool:
-    """width x length 기준으로 원자재 여부 판별"""
     return (round(wip.width), round(wip.length)) in RAW_MATERIAL_SIZES
 
 def get_relocate_target_location(current_loc_id: int, all_location_ids: list) -> int:
@@ -31,14 +29,12 @@ def get_inbound_target_location(all_location_ids: list) -> int:
 
 
 async def run_asis_optimization(db: AsyncSession, scenario_id: int):
-    # 1. 시나리오 확인
     scenario = await db.get(Scenarios, scenario_id)
     if not scenario:
         raise ValueError("시나리오를 찾을 수 없습니다.")
 
     scenario.status = "DRAFT"
 
-    # 2. LazerCutting 조회
     stmt = select(LazerCutting).where(LazerCutting.scenario_id == scenario_id)
     result = await db.execute(stmt)
     cuttings: List[LazerCutting] = list(result.scalars().all())
@@ -46,8 +42,9 @@ async def run_asis_optimization(db: AsyncSession, scenario_id: int):
     if not cuttings:
         return
 
-    ALL_LOCATION_IDS = [1, 2, 3, 4, 5, 6, 7, 8, 9]
-    PICKING_DESTINATIONS = [15, 16, 17, 18]
+    ALL_LOCATION_IDS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]  # stack
+    PICKING_DESTINATIONS = [11, 12, 13, 14]               # 투입 위치
+
     BATCH_SIZE = 4
     grouped_cuttings = [cuttings[i:i + BATCH_SIZE] for i in range(0, len(cuttings), BATCH_SIZE)]
 
@@ -60,11 +57,11 @@ async def run_asis_optimization(db: AsyncSession, scenario_id: int):
         temp_batch_items = []
         current_time = 0
         picking_dest_idx = 0
+        already_picked = set()  # 동일 wip 중복 피킹 방지
 
         for cut in group:
             cut.batch_id = new_batch.id
 
-            # steel_wip_id 없으면 투입 자재 없음 → 스킵
             if not cut.steel_wip_id:
                 continue
 
@@ -74,61 +71,60 @@ async def run_asis_optimization(db: AsyncSession, scenario_id: int):
             if not target_wip.location_id:
                 continue
 
-            # ── 원자재 vs 재공품 판별 ──────────────────────────────────
-            if is_raw_material(target_wip):
-                # ============ 원자재 경로 ============
-                # 원자재는 재배치 없이 바로 피킹
-                picking_dest = PICKING_DESTINATIONS[picking_dest_idx % len(PICKING_DESTINATIONS)]
-                picking_dest_idx += 1
-                temp_batch_items.append({
-                    "steel_wip_id": target_wip.id,
-                    "action": BatchActionType.PICKING.value,
-                    "from": target_wip.location_id,
-                    "to": picking_dest,
-                    "start_time": current_time,
-                    "run_time": 10,
-                })
-                current_time += 10
+            # ── 중복 피킹 방지: 동일 wip은 첫 번째 cut에서만 피킹 ──
+            if target_wip.id not in already_picked:
+                already_picked.add(target_wip.id)
 
-            else:
-                # ============ 재공품 경로 ============
-                # [재배치] 목표 재공품 위에 쌓인 것들을 다른 stack으로 이동
-                top_wips_stmt = select(SteelWip).where(
-                    and_(
-                        SteelWip.location_id == target_wip.location_id,
-                        SteelWip.stack_level > target_wip.stack_level
-                    )
-                ).order_by(SteelWip.stack_level.desc())
-                top_wips = (await db.execute(top_wips_stmt)).scalars().all()
-
-                for top_wip in top_wips:
-                    relocate_dest = get_relocate_target_location(
-                        top_wip.location_id, ALL_LOCATION_IDS
-                    )
+                if is_raw_material(target_wip):
+                    # ===== 원자재: 바로 피킹 =====
+                    picking_dest = PICKING_DESTINATIONS[picking_dest_idx % len(PICKING_DESTINATIONS)]
+                    picking_dest_idx += 1
                     temp_batch_items.append({
-                        "steel_wip_id": top_wip.id,
-                        "action": BatchActionType.RELOCATE.value,
-                        "from": top_wip.location_id,
-                        "to": relocate_dest,
+                        "steel_wip_id": target_wip.id,
+                        "action": BatchActionType.PICKING.value,
+                        "from": target_wip.location_id,
+                        "to": picking_dest,
                         "start_time": current_time,
-                        "run_time": 5,
+                        "run_time": cut.estimated_cutting_time or 0,
                     })
-                    current_time += 5
+                    current_time += (cut.estimated_cutting_time or 0)
 
-                # [피킹] 재공품 피킹
-                picking_dest = PICKING_DESTINATIONS[picking_dest_idx % len(PICKING_DESTINATIONS)]
-                picking_dest_idx += 1
-                temp_batch_items.append({
-                    "steel_wip_id": target_wip.id,
-                    "action": BatchActionType.PICKING.value,
-                    "from": target_wip.location_id,
-                    "to": picking_dest,
-                    "start_time": current_time,
-                    "run_time": 10,
-                })
-                current_time += 10
+                else:
+                    # ===== 재공품: 위 자재 재배치 후 피킹 =====
+                    top_wips_stmt = select(SteelWip).where(
+                        and_(
+                            SteelWip.location_id == target_wip.location_id,
+                            SteelWip.stack_level > target_wip.stack_level
+                        )
+                    ).order_by(SteelWip.stack_level.desc())
+                    top_wips = (await db.execute(top_wips_stmt)).scalars().all()
 
-            # ── 적재(INBOUND): EstimatedWips가 있는 경우에만 ──────────
+                    for top_wip in top_wips:
+                        relocate_dest = get_relocate_target_location(
+                            top_wip.location_id, ALL_LOCATION_IDS
+                        )
+                        temp_batch_items.append({
+                            "steel_wip_id": top_wip.id,
+                            "action": BatchActionType.RELOCATE.value,
+                            "from": top_wip.location_id,
+                            "to": relocate_dest,
+                            "start_time": current_time,
+                            "run_time": None,  # 크레인 소요시간 (optimizer 담당)
+                        })
+
+                    picking_dest = PICKING_DESTINATIONS[picking_dest_idx % len(PICKING_DESTINATIONS)]
+                    picking_dest_idx += 1
+                    temp_batch_items.append({
+                        "steel_wip_id": target_wip.id,
+                        "action": BatchActionType.PICKING.value,
+                        "from": target_wip.location_id,
+                        "to": picking_dest,
+                        "start_time": current_time,
+                        "run_time": cut.estimated_cutting_time or 0,
+                    })
+                    current_time += (cut.estimated_cutting_time or 0)
+
+            # ── 적재(INBOUND): EstimatedWips가 있는 경우에만 ──
             est_wips_stmt = select(EstimatedWips).where(
                 EstimatedWips.lazer_cutting_id == cut.id
             )
@@ -159,10 +155,9 @@ async def run_asis_optimization(db: AsyncSession, scenario_id: int):
                     "from": None,
                     "to": inbound_dest,
                     "start_time": inbound_start_time,
-                    "run_time": 5,
+                    "run_time": None,  # 크레인 소요시간 (optimizer 담당)
                 })
 
-        # 배치 내 작업 정렬 후 저장
         temp_batch_items.sort(key=lambda x: x["start_time"])
 
         for order, item in enumerate(temp_batch_items):
