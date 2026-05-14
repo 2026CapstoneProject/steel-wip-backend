@@ -13,7 +13,7 @@ from app.models import (
 # 원자재 판별 기준 (width x length, mm 단위)
 RAW_MATERIAL_SIZES = {
     (2438, 6096),
-    (2437, 12192),
+    (2438, 12192),
     (6096, 2438),
     (12192, 2438),
 }
@@ -126,7 +126,7 @@ async def run_asis_optimization(db: AsyncSession, scenario_id: int):
                             SteelWip.material == cut.input_material,
                             SteelWip.width == cut.input_width,
                             SteelWip.length == cut.input_length,
-                            SteelWip.status == SteelWipStatus.IN_STOCK.value,
+                            SteelWip.status.in_([SteelWipStatus.IN_STOCK.value, SteelWipStatus.RAW_MATERIAL.value]),
                         )
                     ).limit(1)
                 )
