@@ -9,7 +9,7 @@ import re
 from typing import Iterable
 
 from pypdf import PdfReader
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Projects, Scenarios, LazerCutting, EstimatedWips, QrCodes, SteelWip, Batch, BatchItems, Locations
@@ -774,20 +774,31 @@ async def get_lantek_data(db: AsyncSession, scenario_id: int) -> list:
 
     return [scenario_data]
 
-
 async def delete_lantek_data(db: AsyncSession, scenario_id: int) -> None:
-    # 1. Batch → BatchItems 삭제
+    # 1. BatchItems 삭제
     batch_ids = (
         await db.execute(select(Batch.id).where(Batch.scenario_id == scenario_id))
     ).scalars().all()
     if batch_ids:
         await db.execute(delete(BatchItems).where(BatchItems.batch_id.in_(batch_ids)))
-        await db.execute(delete(Batch).where(Batch.id.in_(batch_ids)))
 
-    # 2. LazerCutting에 연결된 EstimatedWips, REGISTERED SteelWip, QrCodes 삭제
+    # 2. LazerCutting.batch_id를 NULL로 초기화 (Batch FK 해제)
     cutting_ids = (
         await db.execute(select(LazerCutting.id).where(LazerCutting.scenario_id == scenario_id))
     ).scalars().all()
+    if cutting_ids:
+        from sqlalchemy import update
+        await db.execute(
+            update(LazerCutting)
+            .where(LazerCutting.id.in_(cutting_ids))
+            .values(batch_id=None)
+        )
+
+    # 3. Batch 삭제 (이제 참조하는 LazerCutting이 없으므로 삭제 가능)
+    if batch_ids:
+        await db.execute(delete(Batch).where(Batch.id.in_(batch_ids)))
+
+    # 4. EstimatedWips, REGISTERED SteelWip, QrCodes 삭제
     if cutting_ids:
         qr_ids = [
             q for q in (
@@ -800,7 +811,6 @@ async def delete_lantek_data(db: AsyncSession, scenario_id: int) -> None:
 
         await db.execute(delete(EstimatedWips).where(EstimatedWips.lazer_cutting_id.in_(cutting_ids)))
 
-        # ensure_scenario_execution_plan에서 생성된 REGISTERED SteelWip 삭제
         if qr_ids:
             await db.execute(
                 delete(SteelWip).where(
@@ -810,11 +820,13 @@ async def delete_lantek_data(db: AsyncSession, scenario_id: int) -> None:
             )
             await db.execute(delete(QrCodes).where(QrCodes.id.in_(qr_ids)))
 
+        # 5. LazerCutting 삭제
         await db.execute(delete(LazerCutting).where(LazerCutting.scenario_id == scenario_id))
 
-    # 3. 시나리오 삭제
+    # 6. 시나리오 삭제
     scenario = await db.get(Scenarios, scenario_id)
     if scenario:
         await db.delete(scenario)
 
     await db.commit()
+
