@@ -236,15 +236,19 @@ async def _create_parsed_lantek_data(
         material_type = _determine_material_type(layout.slab_width, layout.slab_length)
 
         if material_type == "원자재":
-            if not stock_wips:
-                raise ValueError("가용 가능한 재고(IN_STOCK)가 존재하지 않습니다.")
-            assignments = _pick_matching_wip([layout], stock_wips)
-            target_wip = assignments[0][1]
-            
-            # ★ 원자재도 새 SteelWip(RAW_MATERIAL 상태)을 생성해서 steel_wip_id에 연결
+            # 원자재: DB 매칭 실패해도 통과 (steel_wip_id=None 허용)
+            matched_stock = None
+            if stock_wips:
+                try:
+                    assignments = _pick_matching_wip([layout], stock_wips)
+                    matched_stock = assignments[0][1]
+                except ValueError:
+                    matched_stock = None  # 매칭 실패해도 원자재는 통과
+
+            # 항상 RAW_MATERIAL WIP 새로 생성
             raw_wip = SteelWip(
                 status=WipStatus.RAW_MATERIAL.value,
-                manufacturer=target_wip.manufacturer or "POSCO",
+                manufacturer=matched_stock.manufacturer if matched_stock else "POSCO",
                 material=layout.material,
                 thickness=layout.thickness,
                 width=layout.slab_width,
@@ -252,11 +256,11 @@ async def _create_parsed_lantek_data(
                 weight=_calculate_weight(layout.thickness, layout.slab_width, layout.slab_length),
                 location_id=None,
                 stack_level=None,
-                qr_id=None,  # ← 원자재는 QR코드 없음
+                qr_id=None,
             )
             db.add(raw_wip)
             await db.flush()
-            target_wip = raw_wip   # 이후 코드에서 target_wip을 통일해서 사용
+            target_wip = raw_wip
 
         else:
             target_wip = await _match_wip_for_remanufactured(db, layout)
