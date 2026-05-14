@@ -35,6 +35,19 @@ async def run_asis_optimization(db: AsyncSession, scenario_id: int):
 
     scenario.status = "DRAFT"
 
+    # 기존 배치/배치아이템 삭제 (중복 생성 방지)
+    existing_batches_stmt = select(Batch).where(Batch.scenario_id == scenario_id)
+    existing_batches = (await db.execute(existing_batches_stmt)).scalars().all()
+
+    for batch in existing_batches:
+        items_stmt = select(BatchItems).where(BatchItems.batch_id == batch.id)
+        items = (await db.execute(items_stmt)).scalars().all()
+        for item in items:
+            await db.delete(item)
+        await db.delete(batch)
+
+    await db.flush()
+
     stmt = select(LazerCutting).where(LazerCutting.scenario_id == scenario_id)
     result = await db.execute(stmt)
     cuttings: List[LazerCutting] = list(result.scalars().all())
@@ -42,8 +55,8 @@ async def run_asis_optimization(db: AsyncSession, scenario_id: int):
     if not cuttings:
         return
 
-    ALL_LOCATION_IDS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]  # stack
-    PICKING_DESTINATIONS = [11, 12, 13, 14]               # 투입 위치
+    ALL_LOCATION_IDS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    PICKING_DESTINATIONS = [11, 12, 13, 14]
 
     BATCH_SIZE = 4
     grouped_cuttings = [cuttings[i:i + BATCH_SIZE] for i in range(0, len(cuttings), BATCH_SIZE)]
@@ -57,7 +70,7 @@ async def run_asis_optimization(db: AsyncSession, scenario_id: int):
         temp_batch_items = []
         current_time = 0
         picking_dest_idx = 0
-        already_picked = set()  # 동일 wip 중복 피킹 방지
+        already_picked = set()
 
         for cut in group:
             cut.batch_id = new_batch.id
@@ -71,12 +84,10 @@ async def run_asis_optimization(db: AsyncSession, scenario_id: int):
             if not target_wip.location_id:
                 continue
 
-            # ── 중복 피킹 방지: 동일 wip은 첫 번째 cut에서만 피킹 ──
             if target_wip.id not in already_picked:
                 already_picked.add(target_wip.id)
 
                 if is_raw_material(target_wip):
-                    # ===== 원자재: 바로 피킹 =====
                     picking_dest = PICKING_DESTINATIONS[picking_dest_idx % len(PICKING_DESTINATIONS)]
                     picking_dest_idx += 1
                     temp_batch_items.append({
@@ -90,7 +101,6 @@ async def run_asis_optimization(db: AsyncSession, scenario_id: int):
                     current_time += (cut.estimated_cutting_time or 0)
 
                 else:
-                    # ===== 재공품: 위 자재 재배치 후 피킹 =====
                     top_wips_stmt = select(SteelWip).where(
                         and_(
                             SteelWip.location_id == target_wip.location_id,
@@ -109,7 +119,7 @@ async def run_asis_optimization(db: AsyncSession, scenario_id: int):
                             "from": top_wip.location_id,
                             "to": relocate_dest,
                             "start_time": current_time,
-                            "run_time": None,  # 크레인 소요시간 (optimizer 담당)
+                            "run_time": None,
                         })
 
                     picking_dest = PICKING_DESTINATIONS[picking_dest_idx % len(PICKING_DESTINATIONS)]
@@ -124,7 +134,6 @@ async def run_asis_optimization(db: AsyncSession, scenario_id: int):
                     })
                     current_time += (cut.estimated_cutting_time or 0)
 
-            # ── 적재(INBOUND): EstimatedWips가 있는 경우에만 ──
             est_wips_stmt = select(EstimatedWips).where(
                 EstimatedWips.lazer_cutting_id == cut.id
             )
@@ -155,7 +164,7 @@ async def run_asis_optimization(db: AsyncSession, scenario_id: int):
                     "from": None,
                     "to": inbound_dest,
                     "start_time": inbound_start_time,
-                    "run_time": None,  # 크레인 소요시간 (optimizer 담당)
+                    "run_time": None,
                 })
 
         temp_batch_items.sort(key=lambda x: x["start_time"])
