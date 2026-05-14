@@ -44,6 +44,7 @@ class BatchItemDetail(BaseModel):
     batchItemAction: str
     steelWipId: int
     qrCode: Optional[str] = None
+    ncCode: Optional[str] = None  
     manufacturer: str
     material: str
     thickness: float

@@ -11,7 +11,7 @@ from sqlalchemy import func, update, delete
 from sqlalchemy.orm import selectinload
 from app.models import (
     Projects, Scenarios, LazerCutting, Batch, BatchItems, 
-    SteelWip, Locations, EstimatedWips, QrCodes
+    SteelWip, Locations, EstimatedWips, QrCodes,EstimatedWips, LazerCutting
 )
 from app.schemas.scenario import (
     ScenarioResultData,
@@ -154,7 +154,15 @@ async def get_scenario_result(db: AsyncSession, scenario_id: int) -> list:
                 await db.get(QrCodes, wip.qr_id) if wip and wip.qr_id else None
             )
             # ↑↑↑ 수정된 부분 끑 ↑↑↑
-            
+            nc_code = None
+            if qr_code:
+                # QrCodes.id 기준으로 EstimatedWips 조회
+                ew_stmt = select(EstimatedWips).where(EstimatedWips.qr_id == qr_code.id)
+                ew = (await db.execute(ew_stmt)).scalars().first()
+                if ew and ew.lazer_cutting_id:
+                    lc = await db.get(LazerCutting, ew.lazer_cutting_id)
+                    nc_code = lc.nc_code if lc else None
+
             # Location 명칭 치환
             from_loc = await db.get(Locations, item.from_location) if item.from_location else None
             to_loc = await db.get(Locations, item.to_location) if item.to_location else None
@@ -166,6 +174,7 @@ async def get_scenario_result(db: AsyncSession, scenario_id: int) -> list:
                 batchItemAction=action_name,
                 steelWipId=item.steel_wip_id or (wip.id if wip else 0),
                 qrCode=(qr_code.qr_code if qr_code and qr_code.qr_code else None),
+                ncCode=nc_code,
                 manufacturer=wip.manufacturer if wip else "알수없음",
                 material=wip.material if wip else "알수없음",
                 thickness=wip.thickness if wip else 0.0,
