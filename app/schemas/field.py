@@ -76,7 +76,7 @@ class FieldEndData(BaseModel):
 
 
 class FieldWipDetail(BaseModel):
-    qrId: str
+    qrId: Optional[str] = None
     material: str
     manufacturer: str
     thickness: str
