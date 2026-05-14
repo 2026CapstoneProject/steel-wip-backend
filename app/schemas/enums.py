@@ -10,6 +10,7 @@ class WipStatus(str, Enum):
     IN_STOCK = "IN_STOCK"
     RESERVATED = "RESERVATED"
     CONSUMED = "CONSUMED"
+    RAW_MATERIAL = "RAW_MATERIAL"
 
 class ScenarioStatus(str, Enum):
     DRAFT = "DRAFT"

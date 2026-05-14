@@ -9,7 +9,7 @@ import re
 from typing import Iterable
 
 from pypdf import PdfReader
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Projects, Scenarios, LazerCutting, EstimatedWips, QrCodes, SteelWip, Batch, BatchItems, Locations
@@ -264,48 +264,94 @@ def _pick_matching_wip(
 
     return assignments
 
+async def _match_wip_for_remanufactured(
+    db: AsyncSession,
+    layout: ParsedLantekLayout,
+) -> SteelWip | None:
+    """재공품 투입 자재를 DB에서 두께+재질+규격으로 매칭"""
+    result = await db.execute(
+        select(SteelWip)
+        .where(
+            SteelWip.material == layout.material,
+            SteelWip.thickness == layout.thickness,
+            SteelWip.width >= layout.slab_width,
+            SteelWip.length >= layout.slab_length,
+            SteelWip.status.in_([WipStatus.IN_STOCK.value, WipStatus.REGISTERED.value]),
+        )
+        .order_by(SteelWip.id.asc())
+        .limit(1)
+    )
+    return result.scalars().first()
+
 async def _create_parsed_lantek_data(
     db: AsyncSession,
     scenario: Scenarios,
     layouts: list[ParsedLantekLayout],
 ) -> None:
+    # 원자재용 IN_STOCK WIP 조회 (기존)
     stock_stmt = (
         select(SteelWip)
         .where(SteelWip.status == WipStatus.IN_STOCK.value)
         .order_by(SteelWip.id.asc())
     )
     stock_wips = (await db.execute(stock_stmt)).scalars().all()
-    if not stock_wips:
-        raise ValueError("가용 가능한 재고(IN_STOCK)가 존재하지 않습니다.")
 
-    assignments = _pick_matching_wip(layouts, stock_wips)
+    for index, layout in enumerate(layouts, start=1):
+        material_type = _determine_material_type(layout.slab_width, layout.slab_length)
 
-    for index, (layout, target_wip) in enumerate(assignments, start=1):
+        if material_type == "원자재":
+            if not stock_wips:
+                raise ValueError("가용 가능한 재고(IN_STOCK)가 존재하지 않습니다.")
+            assignments = _pick_matching_wip([layout], stock_wips)
+            target_wip = assignments[0][1]
+            
+            # ★ 원자재도 새 SteelWip(RAW_MATERIAL 상태)을 생성해서 steel_wip_id에 연결
+            raw_wip = SteelWip(
+                status=WipStatus.RAW_MATERIAL.value,
+                manufacturer=target_wip.manufacturer or "POSCO",
+                material=layout.material,
+                thickness=layout.thickness,
+                width=layout.slab_width,
+                length=layout.slab_length,
+                weight=_calculate_weight(layout.thickness, layout.slab_width, layout.slab_length),
+                location_id=None,
+                stack_level=None,
+                qr_id=None,  # ← 원자재는 QR코드 없음
+            )
+            db.add(raw_wip)
+            await db.flush()
+            target_wip = raw_wip   # 이후 코드에서 target_wip을 통일해서 사용
+
+        else:
+            target_wip = await _match_wip_for_remanufactured(db, layout)
+            if target_wip is None:
+                raise ValueError(...)
+
         cutting = LazerCutting(
             scenario_id=scenario.id,
             status="PENDING",
             priority="LOW",
             estimated_cutting_time=layout.estimated_minutes,
-            steel_wip_id=target_wip.id,
+            # 원자재 → steel_wip_id=None (피킹 시 input_width/length로 재고 조회)
+            # 재공품 → steel_wip_id에 해당 WIP id 세팅
+            steel_wip_id=target_wip.id,   # ★ 원자재/재공품 모두 항상 steel_wip_id 세팅
             nc_code=layout.nc_code,
-            input_material=layout.material,        # ← 추가
-            input_width=layout.input_width,        # ← 추가
-            input_length=layout.input_length,      # ← 추가
+            input_material=layout.material,
+            input_width=layout.input_width,
+            input_length=layout.input_length,
         )
         db.add(cutting)
         await db.flush()
 
-        # 단품 테이블에서 파싱된 재공품만 EstimatedWips로 저장
+        # 이하 EstimatedWips 저장 로직은 기존과 동일
         if layout.output_parts:
             for part in layout.output_parts:
-                if not part["qr_code"]:   # ← QR코드 없으면 skip (일반 단품)
+                if not part["qr_code"]:
                     continue
-
                 qr_code_obj = QrCodes(qr_code=part["qr_code"])
                 db.add(qr_code_obj)
                 await db.flush()
-
-                estimated_wip = EstimatedWips(
+                db.add(EstimatedWips(
                     lazer_cutting_id=cutting.id,
                     qr_id=qr_code_obj.id,
                     manufacturer=target_wip.manufacturer or "POSCO",
@@ -314,9 +360,7 @@ async def _create_parsed_lantek_data(
                     width=float(part["width"]),
                     length=float(part["height"]),
                     weight=float(part["weight"]),
-                )
-                db.add(estimated_wip)
-
+                ))
 
 
 def _extract_planned_wip_id_from_qr(qr_code: str | None) -> int | None:
@@ -453,68 +497,49 @@ async def ensure_scenario_execution_plan(
             cut.batch_id = batch.id
             source_wip = await db.get(SteelWip, cut.steel_wip_id) if cut.steel_wip_id else None
 
-            if source_wip and source_wip.location_id:
+            if source_wip and source_wip.status == WipStatus.RAW_MATERIAL.value:
+                # 원자재: 동일 규격의 IN_STOCK WIP을 찾아 피킹
+                matching_stock = (await db.execute(
+                    select(SteelWip).where(
+                        SteelWip.material == source_wip.material,
+                        SteelWip.thickness == source_wip.thickness,
+                        SteelWip.width == source_wip.width,
+                        SteelWip.length == source_wip.length,
+                        SteelWip.status == WipStatus.IN_STOCK.value,
+                    ).limit(1)
+                )).scalars().first()
+
+                if matching_stock and matching_stock.location_id:
+                    picking_dest = None
+                    if picking_destinations:
+                        picking_dest = picking_destinations[picking_dest_idx % len(picking_destinations)]
+                        picking_dest_idx += 1
+                    temp_items.append({
+                        "steel_wip_id": matching_stock.id,
+                        "action": BatchActionType.PICKING.value,
+                        "from": matching_stock.location_id,
+                        "to": picking_dest,
+                        "start_time": current_time,
+                        "run_time": 10,
+                    })
+                    current_time += 10
+
+            elif source_wip and source_wip.location_id:
+                # 재공품: 피킹
                 picking_dest = None
                 if picking_destinations:
                     picking_dest = picking_destinations[picking_dest_idx % len(picking_destinations)]
                     picking_dest_idx += 1
-                temp_items.append(
-                    {
-                        "steel_wip_id": source_wip.id,
-                        "action": BatchActionType.PICKING.value,
-                        "from": source_wip.location_id,
-                        "to": picking_dest,
-                        "start_time": current_time,
-                        "run_time": 10,
-                    }
-                )
+                temp_items.append({
+                    "steel_wip_id": source_wip.id,
+                    "action": BatchActionType.PICKING.value,
+                    "from": source_wip.location_id,
+                    "to": picking_dest,
+                    "start_time": current_time,
+                    "run_time": 10,
+                })
                 current_time += 10
-
-            estimated_wips = (
-                await db.execute(
-                    select(EstimatedWips)
-                    .where(EstimatedWips.lazer_cutting_id == cut.id)
-                    .order_by(EstimatedWips.id.asc())
-                )
-            ).scalars().all()
-
-            for est_wip in estimated_wips:
-                realized_wip = None
-                if est_wip.qr_id:
-                    realized_wip = (
-                        await db.execute(select(SteelWip).where(SteelWip.qr_id == est_wip.qr_id))
-                    ).scalars().first()
-                if realized_wip is None:
-                    realized_wip = SteelWip(
-                        status=WipStatus.REGISTERED.value,
-                        manufacturer=est_wip.manufacturer or (source_wip.manufacturer if source_wip else "POSCO"),
-                        material=est_wip.material or (source_wip.material if source_wip else "UNKNOWN"),
-                        thickness=est_wip.thickness or 0.0,
-                        width=est_wip.width or 0.0,
-                        length=est_wip.length or 0.0,
-                        weight=est_wip.weight or 0.0,
-                        location_id=None,
-                        stack_level=None,
-                        qr_id=est_wip.qr_id,
-                    )
-                    db.add(realized_wip)
-                    await db.flush()
-
-                inbound_dest = None
-                if inbound_destinations:
-                    inbound_dest = inbound_destinations[inbound_dest_idx % len(inbound_destinations)]
-                    inbound_dest_idx += 1
-                temp_items.append(
-                    {
-                        "steel_wip_id": realized_wip.id,
-                        "action": BatchActionType.INBOUND.value,
-                        "from": None,
-                        "to": inbound_dest,
-                        "start_time": current_time + (cut.estimated_cutting_time or 0),
-                        "run_time": 5,
-                    }
-                )
-
+                
         temp_items.sort(key=lambda item: (item["start_time"], item["action"], item["steel_wip_id"]))
         for item_order, item in enumerate(temp_items, start=1):
             db.add(
@@ -743,22 +768,59 @@ async def get_lantek_data(db: AsyncSession, scenario_id: int) -> list:
 
     return [scenario_data]
 
-
 async def delete_lantek_data(db: AsyncSession, scenario_id: int) -> None:
-    cutting_ids_stmt = select(LazerCutting.id).where(LazerCutting.scenario_id == scenario_id)
-    cutting_ids = (await db.execute(cutting_ids_stmt)).scalars().all()
+    # 1. BatchItems 삭제
+    batch_ids = (
+        await db.execute(select(Batch.id).where(Batch.scenario_id == scenario_id))
+    ).scalars().all()
+    if batch_ids:
+        await db.execute(delete(BatchItems).where(BatchItems.batch_id.in_(batch_ids)))
 
+    # 2. LazerCutting.batch_id를 NULL로 초기화 (Batch FK 해제)
+    cutting_ids = (
+        await db.execute(select(LazerCutting.id).where(LazerCutting.scenario_id == scenario_id))
+    ).scalars().all()
     if cutting_ids:
-        qr_ids_stmt = select(EstimatedWips.qr_id).where(EstimatedWips.lazer_cutting_id.in_(cutting_ids))
-        qr_ids = [q for q in (await db.execute(qr_ids_stmt)).scalars().all() if q]
+        from sqlalchemy import update
+        await db.execute(
+            update(LazerCutting)
+            .where(LazerCutting.id.in_(cutting_ids))
+            .values(batch_id=None)
+        )
+
+    # 3. Batch 삭제 (이제 참조하는 LazerCutting이 없으므로 삭제 가능)
+    if batch_ids:
+        await db.execute(delete(Batch).where(Batch.id.in_(batch_ids)))
+
+    # 4. EstimatedWips, REGISTERED SteelWip, QrCodes 삭제
+    if cutting_ids:
+        qr_ids = [
+            q for q in (
+                await db.execute(
+                    select(EstimatedWips.qr_id).where(EstimatedWips.lazer_cutting_id.in_(cutting_ids))
+                )
+            ).scalars().all()
+            if q
+        ]
 
         await db.execute(delete(EstimatedWips).where(EstimatedWips.lazer_cutting_id.in_(cutting_ids)))
+
         if qr_ids:
+            await db.execute(
+                delete(SteelWip).where(
+                    SteelWip.qr_id.in_(qr_ids),
+                    SteelWip.status == WipStatus.REGISTERED.value,
+                )
+            )
             await db.execute(delete(QrCodes).where(QrCodes.id.in_(qr_ids)))
+
+        # 5. LazerCutting 삭제
         await db.execute(delete(LazerCutting).where(LazerCutting.scenario_id == scenario_id))
 
+    # 6. 시나리오 삭제
     scenario = await db.get(Scenarios, scenario_id)
     if scenario:
-        scenario.status = None
+        await db.delete(scenario)
 
     await db.commit()
+

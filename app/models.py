@@ -52,11 +52,11 @@ class ScenariosStatus(str, enum.Enum):
 
 
 class SteelWipStatus(str, enum.Enum):
+    RAW_MATERIAL = 'RAW_MATERIAL'   # ← 추가: LANTEK 가져오기 시 원자재 임시 등록
     REGISTERED = 'REGISTERED'
     IN_STOCK = 'IN_STOCK'
     RESERVATED = 'RESERVATED'
     CONSUMED = 'CONSUMED'
-
 
 class UsersRole(str, enum.Enum):
     OFFICE = 'OFFICE'

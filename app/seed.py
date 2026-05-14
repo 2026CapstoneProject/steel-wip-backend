@@ -74,7 +74,7 @@ async def seed_database(db: AsyncSession) -> None:
             id=int(row['id']), 
             loc_name=row['loc_name'],
             # csv에 없는 기본값 설정
-            loc_can_stock=1 if 'LAZER' not in row['loc_name'] else 0,
+            loc_can_stock=row['loc_can_stock'],
             loc_stack_height=3 if 'LAZER' not in row['loc_name'] else 0
         ) for row in loc_data
     ]
