@@ -387,6 +387,7 @@ async def get_live_field_data(db: AsyncSession, lazer_name: str) -> List[FieldBa
         select(BatchItems)
         .where(
             BatchItems.batch_id.in_(batch_ids),
+            BatchItems.status.in_(["PENDING", "IN_PROGRESS"]),  # ← 추가
         )
         .order_by(BatchItems.batch_id.asc(), BatchItems.batch_item_order.asc(), BatchItems.expected_start_time.asc())
     )
@@ -407,16 +408,14 @@ async def get_live_field_data(db: AsyncSession, lazer_name: str) -> List[FieldBa
                     if qr:
                         qr_code_val = qr.qr_code
                 nc_code_val = None
-                if wip.qr_id:
-                    qr = await db.get(QrCodes, wip.qr_id)
-                    if qr:
-                        qr_code_val = qr.qr_code
-                        # NC코드 역추적: QrCodes.id → EstimatedWips → LazerCutting
-                        ew_stmt = select(EstimatedWips).where(EstimatedWips.qr_id == qr.id)
-                        ew = (await db.execute(ew_stmt)).scalars().first()
-                        if ew and ew.lazer_cutting_id:
-                            lc = await db.get(LazerCutting, ew.lazer_cutting_id)
-                            nc_code_val = lc.nc_code if lc else None
+                if item.batch_item_action == "PICKING" and wip:
+                    lc_stmt = select(LazerCutting).where(
+                        LazerCutting.steel_wip_id == wip.id,
+                        LazerCutting.batch_id == item.batch_id,
+                    )
+                    lc = (await db.execute(lc_stmt)).scalars().first()
+                    nc_code_val = lc.nc_code if lc else None 
+                               
                 # float 값들을 명세서 형식인 str로 변환
                 wip_detail_list.append(FieldWipDetail(
                     qrId=qr_code_val,
