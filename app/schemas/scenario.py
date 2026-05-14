@@ -53,6 +53,7 @@ class BatchItemDetail(BaseModel):
     fromLocation: Optional[str] = None
     toLocation: Optional[str] = None
     expectedStartTime: int
+    expectedRunningTime: Optional[int] = None  
 
 class ScenarioSolverSummary(BaseModel):
     status: str
