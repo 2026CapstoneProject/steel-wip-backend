@@ -19,8 +19,13 @@ RAW_MATERIAL_SIZES = {
 
 RELOCATE_TIME_MIN = 5
 RELOCATE_TIME_MAX = 10
+PICKING_TIME_MIN = 5
+PICKING_TIME_MAX = 10
 INBOUND_TIME_MIN = 5
 INBOUND_TIME_MAX = 10
+
+ALL_LOCATION_IDS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+PICKING_DESTINATIONS = [11, 12, 13, 14]
 
 
 def is_raw_material(wip: SteelWip) -> bool:
@@ -61,14 +66,6 @@ async def run_asis_optimization(db: AsyncSession, scenario_id: int):
     if not cuttings:
         return
 
-    # 상단 상수 부분에 PICKING_TIME 추가
-    RELOCATE_TIME_MIN = 5
-    RELOCATE_TIME_MAX = 10
-    PICKING_TIME_MIN = 5      # ← 추가
-    PICKING_TIME_MAX = 10     # ← 추가
-    INBOUND_TIME_MIN = 5
-    INBOUND_TIME_MAX = 10
-
     BATCH_SIZE = 4
     grouped_cuttings = [
         cuttings[i:i + BATCH_SIZE] for i in range(0, len(cuttings), BATCH_SIZE)
@@ -81,7 +78,7 @@ async def run_asis_optimization(db: AsyncSession, scenario_id: int):
         await db.flush()
 
         temp_batch_items = []
-        current_time = 0          # ← 배치마다 0부터 시작
+        current_time = 0
         picking_dest_idx = 0
         already_picked = set()
 
@@ -108,7 +105,7 @@ async def run_asis_optimization(db: AsyncSession, scenario_id: int):
                         picking_dest_idx % len(PICKING_DESTINATIONS)
                     ]
                     picking_dest_idx += 1
-                    picking_time = random.randint(PICKING_TIME_MIN, PICKING_TIME_MAX)  # ← 변경
+                    picking_time = random.randint(PICKING_TIME_MIN, PICKING_TIME_MAX)
                     temp_batch_items.append({
                         "steel_wip_id": target_wip.id,
                         "action": BatchActionType.PICKING.value,
@@ -120,12 +117,37 @@ async def run_asis_optimization(db: AsyncSession, scenario_id: int):
                     current_time += picking_time
 
                 else:
-                    # ===== 재공품: 피킹 부분 =====
+                    # ===== 재공품: 위 자재 재배치 후 피킹 =====
+                    top_wips_stmt = select(SteelWip).where(
+                        and_(
+                            SteelWip.location_id == target_wip.location_id,
+                            SteelWip.stack_level > target_wip.stack_level
+                        )
+                    ).order_by(SteelWip.stack_level.desc())
+                    top_wips = (await db.execute(top_wips_stmt)).scalars().all()
+
+                    for top_wip in top_wips:
+                        relocate_dest = get_relocate_target_location(
+                            top_wip.location_id, ALL_LOCATION_IDS
+                        )
+                        relocate_time = random.randint(
+                            RELOCATE_TIME_MIN, RELOCATE_TIME_MAX
+                        )
+                        temp_batch_items.append({
+                            "steel_wip_id": top_wip.id,
+                            "action": BatchActionType.RELOCATE.value,
+                            "from": top_wip.location_id,
+                            "to": relocate_dest,
+                            "start_time": current_time,
+                            "run_time": relocate_time,
+                        })
+                        current_time += relocate_time
+
                     picking_dest = PICKING_DESTINATIONS[
                         picking_dest_idx % len(PICKING_DESTINATIONS)
                     ]
                     picking_dest_idx += 1
-                    picking_time = random.randint(PICKING_TIME_MIN, PICKING_TIME_MAX)  # ← 변경
+                    picking_time = random.randint(PICKING_TIME_MIN, PICKING_TIME_MAX)
                     temp_batch_items.append({
                         "steel_wip_id": target_wip.id,
                         "action": BatchActionType.PICKING.value,
@@ -158,7 +180,6 @@ async def run_asis_optimization(db: AsyncSession, scenario_id: int):
                 db.add(new_steel_wip)
                 await db.flush()
 
-                # 적재는 해당 커팅의 피킹 완료 후 cutting_time이 지난 시점
                 inbound_start_time = current_time + (cut.estimated_cutting_time or 0)
                 inbound_time = random.randint(INBOUND_TIME_MIN, INBOUND_TIME_MAX)
                 inbound_dest = get_inbound_target_location(ALL_LOCATION_IDS)
