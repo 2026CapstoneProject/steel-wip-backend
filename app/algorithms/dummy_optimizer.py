@@ -10,7 +10,7 @@ from app.models import (
 )
 from app.schemas.enums import BatchActionType, BatchItemStatus, WipStatus
 
-# 원자재 판별 기준 (width x length, mm 단위)
+# 원자재 판별 기준: (width, length) 쌍 (float → int 변환 후 비교)
 RAW_MATERIAL_SIZES = {
     (2438, 6096),
     (2437, 12192),
@@ -20,15 +20,13 @@ RAW_MATERIAL_SIZES = {
 
 def is_raw_material(wip: SteelWip) -> bool:
     """width x length 기준으로 원자재 여부 판별"""
-    return (int(wip.width), int(wip.length)) in RAW_MATERIAL_SIZES
+    return (round(wip.width), round(wip.length)) in RAW_MATERIAL_SIZES
 
 def get_relocate_target_location(current_loc_id: int, all_location_ids: list) -> int:
-    """현재 location이 아닌 다른 location을 단순 선택 (round-robin 없이 첫 번째)"""
     others = [loc for loc in all_location_ids if loc != current_loc_id]
     return others[0] if others else current_loc_id
 
 def get_inbound_target_location(all_location_ids: list) -> int:
-    """가장 stack이 적은 location 선택 (단순 random fallback)"""
     return random.choice(all_location_ids) if all_location_ids else 1
 
 
@@ -48,10 +46,8 @@ async def run_asis_optimization(db: AsyncSession, scenario_id: int):
     if not cuttings:
         return
 
-    # 전체 location id 목록 (재배치 대상지 선정용)
     ALL_LOCATION_IDS = [1, 2, 3, 4, 5, 6, 7, 8, 9]
     PICKING_DESTINATIONS = [15, 16, 17, 18]
-
     BATCH_SIZE = 4
     grouped_cuttings = [cuttings[i:i + BATCH_SIZE] for i in range(0, len(cuttings), BATCH_SIZE)]
 
@@ -68,16 +64,34 @@ async def run_asis_optimization(db: AsyncSession, scenario_id: int):
         for cut in group:
             cut.batch_id = new_batch.id
 
-            # ── 투입 자재 판별 ──────────────────────────────────────────
-            # steel_wip_id 있음 → 재공품, 없음 → 원자재
-            if cut.steel_wip_id:
-                # ============ 재공품 경로 ============
-                target_wip = await db.get(SteelWip, cut.steel_wip_id)
-                if not target_wip or target_wip.status != WipStatus.IN_STOCK.value:
-                    raise ValueError(f"WIP ID {cut.steel_wip_id}가 IN_STOCK 상태가 아닙니다.")
-                if not target_wip.location_id:
-                    continue
+            # steel_wip_id 없으면 투입 자재 없음 → 스킵
+            if not cut.steel_wip_id:
+                continue
 
+            target_wip = await db.get(SteelWip, cut.steel_wip_id)
+            if not target_wip or target_wip.status != WipStatus.IN_STOCK.value:
+                raise ValueError(f"WIP ID {cut.steel_wip_id}가 IN_STOCK 상태가 아닙니다.")
+            if not target_wip.location_id:
+                continue
+
+            # ── 원자재 vs 재공품 판별 ──────────────────────────────────
+            if is_raw_material(target_wip):
+                # ============ 원자재 경로 ============
+                # 원자재는 재배치 없이 바로 피킹
+                picking_dest = PICKING_DESTINATIONS[picking_dest_idx % len(PICKING_DESTINATIONS)]
+                picking_dest_idx += 1
+                temp_batch_items.append({
+                    "steel_wip_id": target_wip.id,
+                    "action": BatchActionType.PICKING.value,
+                    "from": target_wip.location_id,
+                    "to": picking_dest,
+                    "start_time": current_time,
+                    "run_time": 10,
+                })
+                current_time += 10
+
+            else:
+                # ============ 재공품 경로 ============
                 # [재배치] 목표 재공품 위에 쌓인 것들을 다른 stack으로 이동
                 top_wips_stmt = select(SteelWip).where(
                     and_(
@@ -114,34 +128,7 @@ async def run_asis_optimization(db: AsyncSession, scenario_id: int):
                 })
                 current_time += 10
 
-            else:
-                # ============ 원자재 경로 ============
-                # planned_source_wip_id로 원자재 SteelWip 조회
-                if not cut.planned_source_wip_id:
-                    continue
-
-                raw_wip = await db.get(SteelWip, cut.planned_source_wip_id)
-                if not raw_wip or raw_wip.status != WipStatus.IN_STOCK.value:
-                    raise ValueError(
-                        f"원자재 WIP ID {cut.planned_source_wip_id}가 IN_STOCK 상태가 아닙니다."
-                    )
-                if not raw_wip.location_id:
-                    continue
-
-                # 원자재는 위에 쌓인 것이 없으므로 바로 피킹
-                picking_dest = PICKING_DESTINATIONS[picking_dest_idx % len(PICKING_DESTINATIONS)]
-                picking_dest_idx += 1
-                temp_batch_items.append({
-                    "steel_wip_id": raw_wip.id,
-                    "action": BatchActionType.PICKING.value,
-                    "from": raw_wip.location_id,
-                    "to": picking_dest,
-                    "start_time": current_time,
-                    "run_time": 10,
-                })
-                current_time += 10
-
-            # ── 적재(INBOUND): 생산 후 잔재가 생기는 경우에만 ──────────
+            # ── 적재(INBOUND): EstimatedWips가 있는 경우에만 ──────────
             est_wips_stmt = select(EstimatedWips).where(
                 EstimatedWips.lazer_cutting_id == cut.id
             )
