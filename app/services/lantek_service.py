@@ -776,22 +776,45 @@ async def get_lantek_data(db: AsyncSession, scenario_id: int) -> list:
 
 
 async def delete_lantek_data(db: AsyncSession, scenario_id: int) -> None:
-    cutting_ids_stmt = select(LazerCutting.id).where(LazerCutting.scenario_id == scenario_id)
-    cutting_ids = (await db.execute(cutting_ids_stmt)).scalars().all()
+    # 1. Batch → BatchItems 삭제
+    batch_ids = (
+        await db.execute(select(Batch.id).where(Batch.scenario_id == scenario_id))
+    ).scalars().all()
+    if batch_ids:
+        await db.execute(delete(BatchItems).where(BatchItems.batch_id.in_(batch_ids)))
+        await db.execute(delete(Batch).where(Batch.id.in_(batch_ids)))
 
+    # 2. LazerCutting에 연결된 EstimatedWips, REGISTERED SteelWip, QrCodes 삭제
+    cutting_ids = (
+        await db.execute(select(LazerCutting.id).where(LazerCutting.scenario_id == scenario_id))
+    ).scalars().all()
     if cutting_ids:
-        qr_ids_stmt = select(EstimatedWips.qr_id).where(EstimatedWips.lazer_cutting_id.in_(cutting_ids))
-        qr_ids = [q for q in (await db.execute(qr_ids_stmt)).scalars().all() if q]
+        qr_ids = [
+            q for q in (
+                await db.execute(
+                    select(EstimatedWips.qr_id).where(EstimatedWips.lazer_cutting_id.in_(cutting_ids))
+                )
+            ).scalars().all()
+            if q
+        ]
 
         await db.execute(delete(EstimatedWips).where(EstimatedWips.lazer_cutting_id.in_(cutting_ids)))
+
+        # ensure_scenario_execution_plan에서 생성된 REGISTERED SteelWip 삭제
         if qr_ids:
+            await db.execute(
+                delete(SteelWip).where(
+                    SteelWip.qr_id.in_(qr_ids),
+                    SteelWip.status == WipStatus.REGISTERED.value,
+                )
+            )
             await db.execute(delete(QrCodes).where(QrCodes.id.in_(qr_ids)))
+
         await db.execute(delete(LazerCutting).where(LazerCutting.scenario_id == scenario_id))
 
-    # 변경 전: scenario.status = None
-    # 변경 후: 시나리오 자체 삭제
+    # 3. 시나리오 삭제
     scenario = await db.get(Scenarios, scenario_id)
     if scenario:
-        await db.delete(scenario)   # ← status 변경 대신 삭제
+        await db.delete(scenario)
 
     await db.commit()
