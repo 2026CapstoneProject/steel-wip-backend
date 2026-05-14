@@ -300,21 +300,32 @@ async def _create_parsed_lantek_data(
         material_type = _determine_material_type(layout.slab_width, layout.slab_length)
 
         if material_type == "원자재":
-            # 기존 로직: IN_STOCK WIP에서 규격 매칭
             if not stock_wips:
                 raise ValueError("가용 가능한 재고(IN_STOCK)가 존재하지 않습니다.")
             assignments = _pick_matching_wip([layout], stock_wips)
             target_wip = assignments[0][1]
+            
+            # ★ 원자재도 새 SteelWip(RAW_MATERIAL 상태)을 생성해서 steel_wip_id에 연결
+            raw_wip = SteelWip(
+                status=WipStatus.RAW_MATERIAL.value,
+                manufacturer=target_wip.manufacturer or "POSCO",
+                material=layout.material,
+                thickness=layout.thickness,
+                width=layout.slab_width,
+                length=layout.slab_length,
+                weight=_calculate_weight(layout.thickness, layout.slab_width, layout.slab_length),
+                location_id=target_wip.location_id,
+                stack_level=target_wip.stack_level,
+                qr_id=target_wip.qr_id,
+            )
+            db.add(raw_wip)
+            await db.flush()
+            target_wip = raw_wip   # 이후 코드에서 target_wip을 통일해서 사용
+
         else:
-            # 재공품: 두께+재질+규격으로 DB에서 매칭 (IN_STOCK 또는 REGISTERED 상태)
             target_wip = await _match_wip_for_remanufactured(db, layout)
             if target_wip is None:
-                raise ValueError(
-                    f"재공품 투입 자재 매칭 실패: "
-                    f"재질={layout.material}, 두께={layout.thickness}, "
-                    f"폭={layout.slab_width}, 길이={layout.slab_length} 에 해당하는 "
-                    f"재공품이 전산에 존재하지 않습니다."
-                )
+                raise ValueError(...)
 
         cutting = LazerCutting(
             scenario_id=scenario.id,
@@ -323,7 +334,7 @@ async def _create_parsed_lantek_data(
             estimated_cutting_time=layout.estimated_minutes,
             # 원자재 → steel_wip_id=None (피킹 시 input_width/length로 재고 조회)
             # 재공품 → steel_wip_id에 해당 WIP id 세팅
-            steel_wip_id=None if material_type == "원자재" else target_wip.id,
+            steel_wip_id=target_wip.id,   # ★ 원자재/재공품 모두 항상 steel_wip_id 세팅
             nc_code=layout.nc_code,
             input_material=layout.material,
             input_width=layout.input_width,
