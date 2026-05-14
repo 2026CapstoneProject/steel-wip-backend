@@ -321,7 +321,9 @@ async def _create_parsed_lantek_data(
             status="PENDING",
             priority="LOW",
             estimated_cutting_time=layout.estimated_minutes,
-            steel_wip_id=target_wip.id,
+            # 원자재 → steel_wip_id=None (피킹 시 input_width/length로 재고 조회)
+            # 재공품 → steel_wip_id에 해당 WIP id 세팅
+            steel_wip_id=None if material_type == "원자재" else target_wip.id,
             nc_code=layout.nc_code,
             input_material=layout.material,
             input_width=layout.input_width,
