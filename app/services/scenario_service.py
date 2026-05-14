@@ -27,6 +27,14 @@ from app.schemas.batch_item import BatchItemStatus
 from app.schemas.wip import WipStatus
 from app.services.lantek_service import ensure_scenario_execution_plan
 
+# 원자재 판별 기준 (width x length, mm 단위)
+RAW_MATERIAL_SIZES = {
+    (2438, 6096),
+    (2437, 12192),
+    (6096, 2438),
+    (12192, 2438),
+}
+
 
 async def get_or_create_scenario(db: AsyncSession, project_id: int, scenario_due: date) -> Scenarios:
     """
@@ -83,8 +91,8 @@ async def get_or_create_scenario(db: AsyncSession, project_id: int, scenario_due
         lazer_name="LAZER1",
         emergency_or_not=False,
         project_id=project_id,
-        creator_id=None,   # 인증 미구현: NULL 허용
-        assignee_id=None   # 인증 미구현: NULL 허용
+        creator_id=None,
+        assignee_id=None
     )
     
     db.add(new_scenario)
@@ -139,7 +147,13 @@ async def get_scenario_result(db: AsyncSession, scenario_id: int) -> list:
 
             # WIP 정보
             wip = await db.get(SteelWip, item.steel_wip_id) if item.steel_wip_id else None
-            qr_code = await db.get(QrCodes, wip.qr_id) if wip and wip.qr_id else None
+
+            # ↓↓↓ 원자재 여부 판별 후 QR 처리 (수정된 부분) ↓↓↓
+            wip_is_raw = wip and (round(wip.width), round(wip.length)) in RAW_MATERIAL_SIZES
+            qr_code = None if wip_is_raw else (
+                await db.get(QrCodes, wip.qr_id) if wip and wip.qr_id else None
+            )
+            # ↑↑↑ 수정된 부분 끑 ↑↑↑
             
             # Location 명칭 치환
             from_loc = await db.get(Locations, item.from_location) if item.from_location else None
@@ -153,15 +167,15 @@ async def get_scenario_result(db: AsyncSession, scenario_id: int) -> list:
                 steelWipId=item.steel_wip_id or (wip.id if wip else 0),
                 qrCode=(qr_code.qr_code if qr_code and qr_code.qr_code else None),
                 manufacturer=wip.manufacturer if wip else "알수없음",
-                material=wip.material if wip else "알수없음",       # ← production_plan_spec 제거
-                thickness=wip.thickness if wip else 0.0,            # ← production_plan_spec 제거
-                width=wip.width if wip else 0.0,                    # ← production_plan_spec 제거
-                length=wip.length if wip else 0.0,                  # ← production_plan_spec 제거
+                material=wip.material if wip else "알수없음",
+                thickness=wip.thickness if wip else 0.0,
+                width=wip.width if wip else 0.0,
+                length=wip.length if wip else 0.0,
                 weight=wip.weight if wip else 0.0,
                 fromLocation=from_loc.loc_name if from_loc else None,
                 toLocation=to_loc.loc_name if to_loc else None,
                 expectedStartTime=item.expected_start_time,
-                expectedRunningTime=item.expected_running_time 
+                expectedRunningTime=item.expected_running_time
             ))
 
             if item.steel_wip_id:
@@ -178,7 +192,7 @@ async def get_scenario_result(db: AsyncSession, scenario_id: int) -> list:
         scenarioId=scenario.id,
         scenarioTitle=scenario.title,
         scenarioDue=scenario.scenario_due,
-        lazerName=(scenario.lazer_name.value if hasattr(scenario.lazer_name, 'value') else (scenario.lazer_name or "LAZER1")),  # SQLite str / MySQL Enum 호환
+        lazerName=(scenario.lazer_name.value if hasattr(scenario.lazer_name, 'value') else (scenario.lazer_name or "LAZER1")),
         totalCuttingTime=total_cutting_time,
         totalWipNum=total_wip_num,
         totalCraneMove=total_move_num,
@@ -234,7 +248,6 @@ async def get_scenario_history(
 ) -> list:
     """GET: 시나리오 생성 이력 다중 필터링 및 통계 조회 (DRAFT 상태만)"""
     
-    # 1. 기본 조인 쿼리 (Scenarios + Projects)
     stmt = (
         select(Scenarios, Projects)
         .join(Projects, Scenarios.project_id == Projects.id)
@@ -277,7 +290,6 @@ async def get_scenario_history(
                 "scenario": []
             }
             
-        # [통계 1] 총 예상 커팅 시간
         cut_stmt = select(func.sum(LazerCutting.estimated_cutting_time)).where(LazerCutting.scenario_id == scenario.id)
         total_minute = (await db.execute(cut_stmt)).scalar() or 0
         
@@ -296,10 +308,10 @@ async def get_scenario_history(
             id=scenario.id,
             title=scenario.title,
             due=scenario.scenario_due,
-            lazerName=(scenario.lazer_name.value if hasattr(scenario.lazer_name, 'value') else (scenario.lazer_name or "LAZER1")),  # SQLite str / MySQL Enum 호환
+            lazerName=(scenario.lazer_name.value if hasattr(scenario.lazer_name, 'value') else (scenario.lazer_name or "LAZER1")),
             selectedWips=selected_wips,
-            num_relocation=num_relocation, # Pydantic이 출력 시 "#relocation"으로 자동 치환
-            num_crane=num_crane,           # Pydantic이 출력 시 "#crane"으로 자동 치환
+            num_relocation=num_relocation,
+            num_crane=num_crane,
             totalMinute=total_minute
         )
         
@@ -322,7 +334,6 @@ async def send_scenario_to_field(db: AsyncSession, scenario_id: int):
     - PICKING 대상 SteelWip 상태 RESERVATED 변경
     - 동일한 title을 가졌지만 선택되지 않은 다른 시나리오들 삭제
     """
-    # 1. 대상 시나리오 조회 및 유효성 검사
     scenario = await db.get(Scenarios, scenario_id)
     if not scenario:
         raise ValueError("전송할 시나리오를 찾을 수 없습니다.")
@@ -341,13 +352,11 @@ async def send_scenario_to_field(db: AsyncSession, scenario_id: int):
     if scenario.emergency_or_not:
         # 긴급 발주일 경우: 본인은 0순위
         scenario.scenario_order = 0
-        
-        # 기존에 진행 중인(ORDERED, IN_PROGRESS) 시나리오들의 순서를 +1씩 밀어냄
         push_stmt = (
             update(Scenarios)
             .where(
                 Scenarios.status.in_(["ORDERED", "IN_PROGRESS"]),
-                Scenarios.id != scenario_id # 자기 자신은 제외
+                Scenarios.id != scenario_id
             )
             .values(scenario_order=Scenarios.scenario_order + 1)
         )
@@ -371,7 +380,6 @@ async def send_scenario_to_field(db: AsyncSession, scenario_id: int):
     batches = (await db.execute(batch_stmt)).scalars().all()
     
     if batches:
-        # 5. BatchItems의 모든 작업(재배치, 피킹, 적재)을 가져옴
         items_stmt = select(BatchItems).where(
             BatchItems.batch_id.in_(batches)
         )
@@ -395,7 +403,6 @@ async def send_scenario_to_field(db: AsyncSession, scenario_id: int):
                 .values(status=WipStatus.RESERVATED.value)
             )
             
-    # 7. 동일한 title을 가졌지만 선택받지 못한 다른 비교 시나리오들 조회 및 연쇄 삭제
     other_scenarios_stmt = select(Scenarios.id).where(
         Scenarios.title == target_title,
         Scenarios.id != scenario_id,
@@ -411,7 +418,7 @@ async def send_scenario_to_field(db: AsyncSession, scenario_id: int):
         
     # 8. 최종 반영
     await db.commit()
-# app/services/scenario_service.py 하단에 추가
+
 
 async def get_sent_scenario_history(
     db: AsyncSession,
@@ -484,7 +491,7 @@ async def get_sent_scenario_history(
             scenarioId=scenario.id,
             scenarioTitle=scenario.title,
             scenarioDue=scenario.scenario_due,
-            orderedAt=scenario.ordered_at or scenario.created_at, # 예외 방지용 fallback
+            orderedAt=scenario.ordered_at or scenario.created_at,
             numInputWip=num_input_wip
         )
         

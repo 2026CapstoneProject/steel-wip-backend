@@ -72,6 +72,8 @@ async def run_asis_optimization(db: AsyncSession, scenario_id: int):
     ]
 
     batch_order = 1
+    already_picked = set()  # ← 배치 전체에서 중복 피킹 방지
+
     for group in grouped_cuttings:
         new_batch = Batch(scenario_id=scenario_id, batch_order=batch_order)
         db.add(new_batch)
@@ -80,7 +82,6 @@ async def run_asis_optimization(db: AsyncSession, scenario_id: int):
         temp_batch_items = []
         current_time = 0
         picking_dest_idx = 0
-        already_picked = set()
 
         for cut in group:
             cut.batch_id = new_batch.id
@@ -88,35 +89,46 @@ async def run_asis_optimization(db: AsyncSession, scenario_id: int):
             if not cut.steel_wip_id:
                 # ===== 원자재: input_width x input_length로 SteelWip 조회 후 바로 피킹 =====
                 if not cut.input_width or not cut.input_length:
-                    continue  # 투입 사이즈 정보도 없으면 건너뜀
+                    continue
 
-                raw_wip_stmt = select(SteelWip).where(
-                    and_(
-                        SteelWip.width == cut.input_width,
-                        SteelWip.length == cut.input_length,
-                        SteelWip.status == WipStatus.IN_STOCK.value,
-                    )
-                ).limit(1)
+                # 이미 피킹된 WIP 제외하고 조회
+                if already_picked:
+                    raw_wip_stmt = select(SteelWip).where(
+                        and_(
+                            SteelWip.width == cut.input_width,
+                            SteelWip.length == cut.input_length,
+                            SteelWip.status == WipStatus.IN_STOCK.value,
+                            SteelWip.id.not_in(list(already_picked))
+                        )
+                    ).limit(1)
+                else:
+                    raw_wip_stmt = select(SteelWip).where(
+                        and_(
+                            SteelWip.width == cut.input_width,
+                            SteelWip.length == cut.input_length,
+                            SteelWip.status == WipStatus.IN_STOCK.value,
+                        )
+                    ).limit(1)
+
                 raw_wip_result = await db.execute(raw_wip_stmt)
                 raw_wip = raw_wip_result.scalars().first()
 
                 if not raw_wip or not raw_wip.location_id:
-                    continue  # 매칭되는 원자재가 없으면 건너뜀
+                    continue
 
-                if raw_wip.id not in already_picked:
-                    already_picked.add(raw_wip.id)
-                    picking_dest = PICKING_DESTINATIONS[picking_dest_idx % len(PICKING_DESTINATIONS)]
-                    picking_dest_idx += 1
-                    picking_time = random.randint(PICKING_TIME_MIN, PICKING_TIME_MAX)
-                    temp_batch_items.append({
-                        "steel_wip_id": raw_wip.id,
-                        "action": BatchActionType.PICKING.value,
-                        "from": raw_wip.location_id,
-                        "to": picking_dest,
-                        "start_time": current_time,
-                        "run_time": picking_time,
-                    })
-                    current_time += picking_time
+                already_picked.add(raw_wip.id)
+                picking_dest = PICKING_DESTINATIONS[picking_dest_idx % len(PICKING_DESTINATIONS)]
+                picking_dest_idx += 1
+                picking_time = random.randint(PICKING_TIME_MIN, PICKING_TIME_MAX)
+                temp_batch_items.append({
+                    "steel_wip_id": raw_wip.id,
+                    "action": BatchActionType.PICKING.value,
+                    "from": raw_wip.location_id,
+                    "to": picking_dest,
+                    "start_time": current_time,
+                    "run_time": picking_time,
+                })
+                current_time += picking_time
 
                 # 적재(INBOUND): EstimatedWips가 있는 경우에만
                 est_wips_stmt = select(EstimatedWips).where(
@@ -149,8 +161,9 @@ async def run_asis_optimization(db: AsyncSession, scenario_id: int):
                         "start_time": inbound_start_time,
                         "run_time": inbound_time,
                     })
-                continue  # ← 원자재 처리 완료, 이하 재공품 로직은 실행하지 않음
+                continue  # 원자재 처리 완료, 이하 재공품 로직 실행하지 않음
 
+            # ===== 재공품 경로 =====
             target_wip = await db.get(SteelWip, cut.steel_wip_id)
             if not target_wip or target_wip.status != WipStatus.IN_STOCK.value:
                 raise ValueError(
@@ -163,7 +176,7 @@ async def run_asis_optimization(db: AsyncSession, scenario_id: int):
                 already_picked.add(target_wip.id)
 
                 if is_raw_material(target_wip):
-                    # ===== 원자재: 바로 피킹 =====
+                    # steel_wip_id가 있지만 원자재 사이즈인 경우: 바로 피킹
                     picking_dest = PICKING_DESTINATIONS[
                         picking_dest_idx % len(PICKING_DESTINATIONS)
                     ]
@@ -180,7 +193,7 @@ async def run_asis_optimization(db: AsyncSession, scenario_id: int):
                     current_time += picking_time
 
                 else:
-                    # ===== 재공품: 위 자재 재배치 후 피킹 =====
+                    # 재공품: 위 자재 재배치 후 피킹
                     top_wips_stmt = select(SteelWip).where(
                         and_(
                             SteelWip.location_id == target_wip.location_id,
@@ -221,7 +234,7 @@ async def run_asis_optimization(db: AsyncSession, scenario_id: int):
                     })
                     current_time += picking_time
 
-            # ── 적재(INBOUND): EstimatedWips가 있는 경우에만 ──
+            # 적재(INBOUND): EstimatedWips가 있는 경우에만
             est_wips_stmt = select(EstimatedWips).where(
                 EstimatedWips.lazer_cutting_id == cut.id
             )
