@@ -41,6 +41,7 @@ class ScenarioCreateRequest(BaseModel):
 
 
 class BatchItemDetail(BaseModel):
+    batchItemId: int 
     batchItemAction: str
     steelWipId: int
     qrCode: Optional[str] = None

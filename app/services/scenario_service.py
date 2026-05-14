@@ -171,6 +171,7 @@ async def get_scenario_result(db: AsyncSession, scenario_id: int) -> list:
             action_name = "재배치" if item.batch_item_action == "RELOCATE" else "피킹" if item.batch_item_action == "PICKING" else "적재"
 
             batch_items.append(BatchItemDetail(
+                batchItemId=item.id,
                 batchItemAction=action_name,
                 steelWipId=item.steel_wip_id or (wip.id if wip else 0),
                 qrCode=(qr_code.qr_code if qr_code and qr_code.qr_code else None),
