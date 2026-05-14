@@ -160,7 +160,8 @@ async def get_scenario_result(db: AsyncSession, scenario_id: int) -> list:
                 weight=wip.weight if wip else 0.0,
                 fromLocation=from_loc.loc_name if from_loc else None,
                 toLocation=to_loc.loc_name if to_loc else None,
-                expectedStartTime=item.expected_start_time
+                expectedStartTime=item.expected_start_time,
+                expectedRunningTime=item.expected_running_time 
             ))
 
             if item.steel_wip_id:
