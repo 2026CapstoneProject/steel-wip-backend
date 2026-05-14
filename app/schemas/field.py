@@ -76,13 +76,14 @@ class FieldEndData(BaseModel):
 
 
 class FieldWipDetail(BaseModel):
-    qrId: str
+    qrId: Optional[str] = None
     material: str
     manufacturer: str
     thickness: str
     width: str
     length: str
     weight: str
+    ncCode: Optional[str] = None 
 
 class FieldBatchItem(BaseModel):
     scenarioId: Optional[int] = None

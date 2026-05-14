@@ -11,7 +11,7 @@ from sqlalchemy import func, update, delete
 from sqlalchemy.orm import selectinload
 from app.models import (
     Projects, Scenarios, LazerCutting, Batch, BatchItems, 
-    SteelWip, Locations, EstimatedWips, QrCodes
+    SteelWip, Locations, EstimatedWips, QrCodes,EstimatedWips, LazerCutting
 )
 from app.schemas.scenario import (
     ScenarioResultData,
@@ -154,7 +154,15 @@ async def get_scenario_result(db: AsyncSession, scenario_id: int) -> list:
                 await db.get(QrCodes, wip.qr_id) if wip and wip.qr_id else None
             )
             # ↑↑↑ 수정된 부분 끑 ↑↑↑
-            
+            nc_code = None
+            if item.batch_item_action == BatchActionType.PICKING.value and item.steel_wip_id:
+                lc_stmt = select(LazerCutting).where(
+                    LazerCutting.steel_wip_id == item.steel_wip_id,
+                    LazerCutting.batch_id == item.batch_id,
+                )
+                lc = (await db.execute(lc_stmt)).scalars().first()
+                nc_code = lc.nc_code if lc else None
+
             # Location 명칭 치환
             from_loc = await db.get(Locations, item.from_location) if item.from_location else None
             to_loc = await db.get(Locations, item.to_location) if item.to_location else None
@@ -163,9 +171,11 @@ async def get_scenario_result(db: AsyncSession, scenario_id: int) -> list:
             action_name = "재배치" if item.batch_item_action == "RELOCATE" else "피킹" if item.batch_item_action == "PICKING" else "적재"
 
             batch_items.append(BatchItemDetail(
+                batchItemId=item.id,
                 batchItemAction=action_name,
                 steelWipId=item.steel_wip_id or (wip.id if wip else 0),
                 qrCode=(qr_code.qr_code if qr_code and qr_code.qr_code else None),
+                ncCode=nc_code,
                 manufacturer=wip.manufacturer if wip else "알수없음",
                 material=wip.material if wip else "알수없음",
                 thickness=wip.thickness if wip else 0.0,
@@ -213,7 +223,6 @@ async def delete_scenario_cascade(db: AsyncSession, scenario_id: int):
     if not scenario:
         raise ValueError("시나리오를 찾을 수 없습니다.")
 
-    # 1. LazerCutting, EstimatedWips, QrCodes 삭제
     cuttings = (await db.execute(select(LazerCutting.id).where(LazerCutting.scenario_id == scenario_id))).scalars().all()
     if cuttings:
         wips = (await db.execute(select(EstimatedWips.qr_id).where(EstimatedWips.lazer_cutting_id.in_(cuttings)))).scalars().all()
@@ -224,15 +233,13 @@ async def delete_scenario_cascade(db: AsyncSession, scenario_id: int):
             await db.execute(delete(QrCodes).where(QrCodes.id.in_(qr_ids)))
         await db.execute(delete(LazerCutting).where(LazerCutting.scenario_id == scenario_id))
 
-    # 2. Batch, BatchItems 삭제
     batches = (await db.execute(select(Batch.id).where(Batch.scenario_id == scenario_id))).scalars().all()
     if batches:
         await db.execute(delete(BatchItems).where(BatchItems.batch_id.in_(batches)))
         await db.execute(delete(Batch).where(Batch.scenario_id == scenario_id))
 
-    # 3. 최상위 시나리오 삭제
     await db.delete(scenario)
-    await db.commit()
+    # ✅ commit을 여기서 하지 않음 (호출한 쪽에서 한 번만 commit)
 
 
 async def get_scenario_history(
@@ -437,7 +444,7 @@ async def get_sent_scenario_history(
     stmt = (
         select(Scenarios, Projects)
         .join(Projects, Scenarios.project_id == Projects.id)
-        .where(Scenarios.status.notin_(["DRAFT", "LANTEK_IMPORTED", None]))
+        .where(Scenarios.status.in_(["ORDERED", "IN_PROGRESS", "COMPLETED"]))
     )
     
     # 2. 동적 필터링 적용
@@ -499,3 +506,39 @@ async def get_sent_scenario_history(
 
     # 4. Dictionary를 List 객체 형태로 반환
     return [SentProjectHistory(**data) for data in projects_map.values()]
+
+
+
+
+async def update_nc_code(db: AsyncSession, scenario_id: int, batch_item_id: int, nc_code: str):
+    """PATCH: 특정 BatchItem에 연결된 LazerCutting의 NC코드 수정"""
+
+    # 1. BatchItem 존재 + 해당 scenario 소속 확인
+    item_stmt = (
+        select(BatchItems)
+        .join(Batch, BatchItems.batch_id == Batch.id)
+        .where(
+            BatchItems.id == batch_item_id,
+            Batch.scenario_id == scenario_id,
+        )
+    )
+    item = (await db.execute(item_stmt)).scalars().first()
+    if not item:
+        raise ValueError("해당 시나리오에서 BatchItem을 찾을 수 없습니다.")
+
+    # 2. steel_wip_id + batch_id로 LazerCutting 조회
+    lc_stmt = select(LazerCutting).where(
+        LazerCutting.steel_wip_id == item.steel_wip_id,
+        LazerCutting.batch_id == item.batch_id,
+    )
+    lc = (await db.execute(lc_stmt)).scalars().first()
+    if not lc:
+        raise ValueError("해당 BatchItem에 연결된 LazerCutting을 찾을 수 없습니다.")
+
+    # 3. NC코드 업데이트
+    lc.nc_code = nc_code
+    db.add(lc)
+    await db.commit()
+    await db.refresh(lc)
+
+    return {"lazerCuttingId": lc.id, "ncCode": lc.nc_code}

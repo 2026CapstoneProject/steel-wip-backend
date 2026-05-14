@@ -41,9 +41,11 @@ class ScenarioCreateRequest(BaseModel):
 
 
 class BatchItemDetail(BaseModel):
+    batchItemId: int 
     batchItemAction: str
     steelWipId: int
     qrCode: Optional[str] = None
+    ncCode: Optional[str] = None  
     manufacturer: str
     material: str
     thickness: float
@@ -134,3 +136,7 @@ class SentProjectHistory(BaseModel):
     projectTitle: str
     projectDue: date
     scenarios: List[SentScenarioItem]
+
+class NcCodeUpdateRequest(BaseModel):
+    batchItemId: int
+    ncCode: str
