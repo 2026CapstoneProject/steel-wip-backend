@@ -314,9 +314,9 @@ async def _create_parsed_lantek_data(
                 width=layout.slab_width,
                 length=layout.slab_length,
                 weight=_calculate_weight(layout.thickness, layout.slab_width, layout.slab_length),
-                location_id=target_wip.location_id,
-                stack_level=target_wip.stack_level,
-                qr_id=target_wip.qr_id,
+                location_id=None,
+                stack_level=None,
+                qr_id=None,  # ← 원자재는 QR코드 없음
             )
             db.add(raw_wip)
             await db.flush()
