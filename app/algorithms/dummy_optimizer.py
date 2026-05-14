@@ -116,24 +116,39 @@ async def run_asis_optimization(db: AsyncSession, scenario_id: int):
             cut.batch_id = new_batch.id
 
             if cut.steel_wip_id is None:
-                # ==============================
-                # 원자재 경로
-                # steel_wip_id 없음 = 원자재
-                # ==============================
+                # ── 원자재 경로: input_width/length/material로 IN_STOCK SteelWip 조회 ──
+                if not (cut.input_width and cut.input_length and cut.input_material):
+                    continue  # 정보 부족 시 skip
+
+                raw_wip_result = await db.execute(
+                    select(SteelWip).where(
+                        and_(
+                            SteelWip.material == cut.input_material,
+                            SteelWip.width == cut.input_width,
+                            SteelWip.length == cut.input_length,
+                            SteelWip.status == SteelWipStatus.IN_STOCK.value,
+                        )
+                    ).limit(1)
+                )
+                raw_wip = raw_wip_result.scalars().first()
+
+                if not raw_wip or not raw_wip.location_id:
+                    raise ValueError(
+                        f"원자재({cut.input_material} {int(cut.input_width)}x{int(cut.input_length)}) "
+                        f"IN_STOCK 재고를 찾을 수 없습니다."
+                    )
+
                 picking_dest = picking_dest_ids[picking_dest_idx % len(picking_dest_ids)]
                 picking_dest_idx += 1
-
                 temp_batch_items.append({
-                    "steel_wip_id": None,
+                    "steel_wip_id": raw_wip.id,   # ← 실제 WIP id 세팅
                     "action": BatchItemsBatchItemAction.PICKING.value,
-                    "from": None,
+                    "from": raw_wip.location_id,
                     "to": picking_dest,
                     "start_time": current_time,
                     "run_time": 10,
-                    "note": f"원자재 피킹 | {cut.input_material} {int(cut.input_width or 0)}x{int(cut.input_length or 0)} | NC: {cut.nc_code}",
                 })
                 current_time += 10
-
             else:
                 # ==============================
                 # steel_wip_id 있음 → 일단 조회 후 원자재/재공품 재판별
