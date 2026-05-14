@@ -166,9 +166,9 @@ async def get_scenario_result(db: AsyncSession, scenario_id: int) -> list:
             if item.steel_wip_id:
                 wip_detail_map[item.steel_wip_id] = {
                     "qrCode": qr_code.qr_code if qr_code and qr_code.qr_code else None,
-                    "thickness": production_plan_spec.thickness if production_plan_spec else (wip.thickness if wip else None),
-                    "width": production_plan_spec.width if production_plan_spec else (wip.width if wip else None),
-                    "length": production_plan_spec.length if production_plan_spec else (wip.length if wip else None),
+                    "thickness": wip.thickness if wip else None,
+                    "width": wip.width if wip else None,
+                    "length": wip.length if wip else None,
                 }
 
     result_data = ScenarioResultData(
@@ -180,7 +180,7 @@ async def get_scenario_result(db: AsyncSession, scenario_id: int) -> list:
         lazerName=(scenario.lazer_name.value if hasattr(scenario.lazer_name, 'value') else (scenario.lazer_name or "LAZER1")),  # SQLite str / MySQL Enum 호환
         totalCuttingTime=total_cutting_time,
         totalWipNum=total_wip_num,
-        totalCraneMove=total_crane_move,
+        totalCraneMove=total_move_num,
         totalMoveNum=total_move_num,
         batchItems=batch_items,
         solverSummary=None,
