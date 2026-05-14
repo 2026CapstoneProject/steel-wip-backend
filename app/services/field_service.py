@@ -402,7 +402,7 @@ async def get_live_field_data(db: AsyncSession, lazer_name: str) -> List[FieldBa
         if item.steel_wip_id:
             wip = await db.get(SteelWip, item.steel_wip_id)
             if wip:
-                qr_code_val = "UNKNOWN"
+                qr_code_val = None
                 if wip.qr_id:
                     qr = await db.get(QrCodes, wip.qr_id)
                     if qr:
@@ -415,7 +415,7 @@ async def get_live_field_data(db: AsyncSession, lazer_name: str) -> List[FieldBa
                     )
                     lc = (await db.execute(lc_stmt)).scalars().first()
                     nc_code_val = lc.nc_code if lc else None 
-                               
+
                 # float 값들을 명세서 형식인 str로 변환
                 wip_detail_list.append(FieldWipDetail(
                     qrId=qr_code_val,
