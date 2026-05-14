@@ -485,23 +485,50 @@ async def ensure_scenario_execution_plan(
         for cut in group:
             cut.batch_id = batch.id
             source_wip = await db.get(SteelWip, cut.steel_wip_id) if cut.steel_wip_id else None
-
             if source_wip and source_wip.location_id:
+                # 재공품: 기존과 동일하게 피킹
                 picking_dest = None
                 if picking_destinations:
                     picking_dest = picking_destinations[picking_dest_idx % len(picking_destinations)]
                     picking_dest_idx += 1
-                temp_items.append(
-                    {
-                        "steel_wip_id": source_wip.id,
+                temp_items.append({
+                    "steel_wip_id": source_wip.id,
+                    "action": BatchActionType.PICKING.value,
+                    "from": source_wip.location_id,
+                    "to": picking_dest,
+                    "start_time": current_time,
+                    "run_time": 10,
+                })
+                current_time += 10
+
+            elif cut.steel_wip_id is None and cut.input_width and cut.input_length:
+                # 원자재: input_width/length/material로 IN_STOCK WIP 조회 후 피킹
+                from sqlalchemy import and_
+                raw_wip = (await db.execute(
+                    select(SteelWip).where(
+                        and_(
+                            SteelWip.material == cut.input_material,
+                            SteelWip.width == cut.input_width,
+                            SteelWip.length == cut.input_length,
+                            SteelWip.status == WipStatus.IN_STOCK.value,
+                        )
+                    ).limit(1)
+                )).scalars().first()
+
+                if raw_wip and raw_wip.location_id:
+                    picking_dest = None
+                    if picking_destinations:
+                        picking_dest = picking_destinations[picking_dest_idx % len(picking_destinations)]
+                        picking_dest_idx += 1
+                    temp_items.append({
+                        "steel_wip_id": raw_wip.id,
                         "action": BatchActionType.PICKING.value,
-                        "from": source_wip.location_id,
+                        "from": raw_wip.location_id,
                         "to": picking_dest,
                         "start_time": current_time,
                         "run_time": 10,
-                    }
-                )
-                current_time += 10
+                    })
+                    current_time += 10
 
             estimated_wips = (
                 await db.execute(
