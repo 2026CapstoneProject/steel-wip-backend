@@ -155,14 +155,14 @@ async def get_scenario_result(db: AsyncSession, scenario_id: int) -> list:
             )
             # ↑↑↑ 수정된 부분 끑 ↑↑↑
             nc_code = None
-            if qr_code:
-                # QrCodes.id 기준으로 EstimatedWips 조회
-                ew_stmt = select(EstimatedWips).where(EstimatedWips.qr_id == qr_code.id)
-                ew = (await db.execute(ew_stmt)).scalars().first()
-                if ew and ew.lazer_cutting_id:
-                    lc = await db.get(LazerCutting, ew.lazer_cutting_id)
-                    nc_code = lc.nc_code if lc else None
-
+            if item.batch_item_action == BatchActionType.PICKING.value and item.steel_wip_id:
+                lc_stmt = select(LazerCutting).where(
+                    LazerCutting.steel_wip_id == item.steel_wip_id,
+                    LazerCutting.batch_id == item.batch_id,
+                )
+                lc = (await db.execute(lc_stmt)).scalars().first()
+                nc_code = lc.nc_code if lc else None
+                
             # Location 명칭 치환
             from_loc = await db.get(Locations, item.from_location) if item.from_location else None
             to_loc = await db.get(Locations, item.to_location) if item.to_location else None
