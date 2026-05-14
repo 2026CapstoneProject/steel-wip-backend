@@ -6,7 +6,7 @@ import random
 
 from app.models import (
     LazerCutting, Batch, BatchItems, SteelWip,
-    Scenarios, EstimatedWips,
+    Scenarios, EstimatedWips, Locations,
     BatchItemsBatchItemAction, BatchItemsStatus, SteelWipStatus
 )
 
@@ -44,8 +44,21 @@ async def run_asis_optimization(db: AsyncSession, scenario_id: int):
         await db.commit()
         return
 
-    ALL_LOCATION_IDS = [1, 2, 3, 4, 5, 6, 7, 8, 9]
-    PICKING_DESTINATIONS = [15, 16, 17, 18]
+    # ── DB에서 실제 location 목록 조회 ──────────────────────────────
+    loc_result = await db.execute(select(Locations))
+    all_locations = loc_result.scalars().all()
+
+    # loc_can_stock=1: 재공품 보관 가능 (재배치/적재 대상)
+    stock_location_ids = [loc.id for loc in all_locations if loc.loc_can_stock == 1]
+    # loc_can_stock=0: 레이저 앞 대기 등 피킹 목적지
+    picking_dest_ids = [loc.id for loc in all_locations if loc.loc_can_stock == 0]
+
+    # fallback: 구분이 없을 경우 전체 사용
+    if not stock_location_ids:
+        stock_location_ids = [loc.id for loc in all_locations]
+    if not picking_dest_ids:
+        picking_dest_ids = stock_location_ids
+    # ───────────────────────────────────────────────────────────────
 
     BATCH_SIZE = 4
     grouped_cuttings = [cuttings[i:i + BATCH_SIZE] for i in range(0, len(cuttings), BATCH_SIZE)]
@@ -67,16 +80,14 @@ async def run_asis_optimization(db: AsyncSession, scenario_id: int):
                 # ==============================
                 # 원자재 경로
                 # steel_wip_id 없음 = 원자재
-                # input_width, input_length, input_material 로 판재 정보 확인
-                # 원자재는 DB에 없으므로 steel_wip_id = None 으로 피킹 작업 생성
                 # ==============================
-                picking_dest = PICKING_DESTINATIONS[picking_dest_idx % len(PICKING_DESTINATIONS)]
+                picking_dest = picking_dest_ids[picking_dest_idx % len(picking_dest_ids)]
                 picking_dest_idx += 1
 
                 temp_batch_items.append({
-                    "steel_wip_id": None,   # 원자재는 DB WIP 없음
+                    "steel_wip_id": None,
                     "action": BatchItemsBatchItemAction.PICKING.value,
-                    "from": None,           # 원자재 보관 위치는 별도 추적 안함
+                    "from": None,
                     "to": picking_dest,
                     "start_time": current_time,
                     "run_time": 10,
@@ -110,7 +121,7 @@ async def run_asis_optimization(db: AsyncSession, scenario_id: int):
 
                 for top_wip in top_wips:
                     relocate_dest = get_relocate_target_location(
-                        top_wip.location_id, ALL_LOCATION_IDS
+                        top_wip.location_id, stock_location_ids  # ← DB 조회 결과 사용
                     )
                     temp_batch_items.append({
                         "steel_wip_id": top_wip.id,
@@ -123,7 +134,7 @@ async def run_asis_optimization(db: AsyncSession, scenario_id: int):
                     current_time += 5
 
                 # 목표 재공품 피킹
-                picking_dest = PICKING_DESTINATIONS[picking_dest_idx % len(PICKING_DESTINATIONS)]
+                picking_dest = picking_dest_ids[picking_dest_idx % len(picking_dest_ids)]
                 picking_dest_idx += 1
                 temp_batch_items.append({
                     "steel_wip_id": target_wip.id,
@@ -161,7 +172,7 @@ async def run_asis_optimization(db: AsyncSession, scenario_id: int):
                 await db.flush()
 
                 inbound_start_time = current_time + (cut.estimated_cutting_time or 0)
-                inbound_dest = get_inbound_target_location(ALL_LOCATION_IDS)
+                inbound_dest = get_inbound_target_location(stock_location_ids)  # ← DB 조회 결과 사용
                 temp_batch_items.append({
                     "steel_wip_id": new_steel_wip.id,
                     "action": BatchItemsBatchItemAction.INBOUND.value,
