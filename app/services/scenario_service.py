@@ -213,7 +213,6 @@ async def delete_scenario_cascade(db: AsyncSession, scenario_id: int):
     if not scenario:
         raise ValueError("시나리오를 찾을 수 없습니다.")
 
-    # 1. LazerCutting, EstimatedWips, QrCodes 삭제
     cuttings = (await db.execute(select(LazerCutting.id).where(LazerCutting.scenario_id == scenario_id))).scalars().all()
     if cuttings:
         wips = (await db.execute(select(EstimatedWips.qr_id).where(EstimatedWips.lazer_cutting_id.in_(cuttings)))).scalars().all()
@@ -224,15 +223,13 @@ async def delete_scenario_cascade(db: AsyncSession, scenario_id: int):
             await db.execute(delete(QrCodes).where(QrCodes.id.in_(qr_ids)))
         await db.execute(delete(LazerCutting).where(LazerCutting.scenario_id == scenario_id))
 
-    # 2. Batch, BatchItems 삭제
     batches = (await db.execute(select(Batch.id).where(Batch.scenario_id == scenario_id))).scalars().all()
     if batches:
         await db.execute(delete(BatchItems).where(BatchItems.batch_id.in_(batches)))
         await db.execute(delete(Batch).where(Batch.scenario_id == scenario_id))
 
-    # 3. 최상위 시나리오 삭제
     await db.delete(scenario)
-    await db.commit()
+    # ✅ commit을 여기서 하지 않음 (호출한 쪽에서 한 번만 commit)
 
 
 async def get_scenario_history(
@@ -437,7 +434,7 @@ async def get_sent_scenario_history(
     stmt = (
         select(Scenarios, Projects)
         .join(Projects, Scenarios.project_id == Projects.id)
-        .where(Scenarios.status.notin_(["DRAFT", "LANTEK_IMPORTED", None]))
+        .where(Scenarios.status.in_(["ORDERED", "IN_PROGRESS", "COMPLETED"]))
     )
     
     # 2. 동적 필터링 적용
