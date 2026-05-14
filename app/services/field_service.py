@@ -406,7 +406,17 @@ async def get_live_field_data(db: AsyncSession, lazer_name: str) -> List[FieldBa
                     qr = await db.get(QrCodes, wip.qr_id)
                     if qr:
                         qr_code_val = qr.qr_code
-                
+                nc_code_val = None
+                if wip.qr_id:
+                    qr = await db.get(QrCodes, wip.qr_id)
+                    if qr:
+                        qr_code_val = qr.qr_code
+                        # NC코드 역추적: QrCodes.id → EstimatedWips → LazerCutting
+                        ew_stmt = select(EstimatedWips).where(EstimatedWips.qr_id == qr.id)
+                        ew = (await db.execute(ew_stmt)).scalars().first()
+                        if ew and ew.lazer_cutting_id:
+                            lc = await db.get(LazerCutting, ew.lazer_cutting_id)
+                            nc_code_val = lc.nc_code if lc else None
                 # float 값들을 명세서 형식인 str로 변환
                 wip_detail_list.append(FieldWipDetail(
                     qrId=qr_code_val,
@@ -415,7 +425,8 @@ async def get_live_field_data(db: AsyncSession, lazer_name: str) -> List[FieldBa
                     thickness=str(wip.thickness) if wip.thickness else "0",
                     width=str(wip.width) if wip.width else "0",
                     length=str(wip.length) if wip.length else "0",
-                    weight=str(wip.weight) if wip.weight else "0"
+                    weight=str(wip.weight) if wip.weight else "0",
+                    ncCode=nc_code_val,
                 ))
 
         # 5. 출발지, 도착지 구역 이름 조회

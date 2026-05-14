@@ -83,6 +83,7 @@ class FieldWipDetail(BaseModel):
     width: str
     length: str
     weight: str
+    ncCode: Optional[str] = None 
 
 class FieldBatchItem(BaseModel):
     scenarioId: Optional[int] = None
