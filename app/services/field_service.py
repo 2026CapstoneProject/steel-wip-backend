@@ -745,6 +745,8 @@ async def _get_qr_scan_data(
     wip = await db.get(SteelWip, item.steel_wip_id) if item.steel_wip_id else None
     lazer_name = await _get_lazer_name_for_batch(db, item.batch_id)
 
+    is_raw_material = (wip is None) or (wip.qr_id is None)
+
     if action_type == "INBOUND":
         from_loc_name: Optional[str] = lazer_name
         to_loc = await db.get(Locations, item.to_location) if item.to_location else None
@@ -766,11 +768,12 @@ async def _get_qr_scan_data(
         material=wip.material if wip else "",
         thickness=wip.thickness if wip else 0.0,
         width=wip.width if wip else 0.0,
-        height=wip.length if wip else 0.0,   # DB 컬럼명=length, 명세서 표기=height
+        height=wip.length if wip else 0.0,
         weight=wip.weight if wip else 0.0,
         fromLocationName=from_loc_name,
         toLocationName=to_loc_name,
-        itemScan=item.item_scanned_at is not None,
+        # ▼ 수정: 원자재면 itemScan을 True로 고정 (스캔 단계 없음)
+        itemScan=True if is_raw_material else (item.item_scanned_at is not None),
         destinationScan=item.destination_scanned_at is not None,
     )
 
