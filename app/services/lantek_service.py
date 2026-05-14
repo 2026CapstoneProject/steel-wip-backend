@@ -496,8 +496,36 @@ async def ensure_scenario_execution_plan(
         for cut in group:
             cut.batch_id = batch.id
             source_wip = await db.get(SteelWip, cut.steel_wip_id) if cut.steel_wip_id else None
-            if source_wip and source_wip.location_id:
-                # 재공품: 기존과 동일하게 피킹
+
+            if source_wip and source_wip.status == WipStatus.RAW_MATERIAL.value:
+                # 원자재: 동일 규격의 IN_STOCK WIP을 찾아 피킹
+                matching_stock = (await db.execute(
+                    select(SteelWip).where(
+                        SteelWip.material == source_wip.material,
+                        SteelWip.thickness == source_wip.thickness,
+                        SteelWip.width == source_wip.width,
+                        SteelWip.length == source_wip.length,
+                        SteelWip.status == WipStatus.IN_STOCK.value,
+                    ).limit(1)
+                )).scalars().first()
+
+                if matching_stock and matching_stock.location_id:
+                    picking_dest = None
+                    if picking_destinations:
+                        picking_dest = picking_destinations[picking_dest_idx % len(picking_destinations)]
+                        picking_dest_idx += 1
+                    temp_items.append({
+                        "steel_wip_id": matching_stock.id,
+                        "action": BatchActionType.PICKING.value,
+                        "from": matching_stock.location_id,
+                        "to": picking_dest,
+                        "start_time": current_time,
+                        "run_time": 10,
+                    })
+                    current_time += 10
+
+            elif source_wip and source_wip.location_id:
+                # 재공품: 피킹
                 picking_dest = None
                 if picking_destinations:
                     picking_dest = picking_destinations[picking_dest_idx % len(picking_destinations)]
@@ -511,81 +539,7 @@ async def ensure_scenario_execution_plan(
                     "run_time": 10,
                 })
                 current_time += 10
-
-            elif cut.steel_wip_id is None and cut.input_width and cut.input_length:
-                # 원자재: input_width/length/material로 IN_STOCK WIP 조회 후 피킹
-                from sqlalchemy import and_
-                raw_wip = (await db.execute(
-                    select(SteelWip).where(
-                        and_(
-                            SteelWip.material == cut.input_material,
-                            SteelWip.width == cut.input_width,
-                            SteelWip.length == cut.input_length,
-                            SteelWip.status == WipStatus.IN_STOCK.value,
-                        )
-                    ).limit(1)
-                )).scalars().first()
-
-                if raw_wip and raw_wip.location_id:
-                    picking_dest = None
-                    if picking_destinations:
-                        picking_dest = picking_destinations[picking_dest_idx % len(picking_destinations)]
-                        picking_dest_idx += 1
-                    temp_items.append({
-                        "steel_wip_id": raw_wip.id,
-                        "action": BatchActionType.PICKING.value,
-                        "from": raw_wip.location_id,
-                        "to": picking_dest,
-                        "start_time": current_time,
-                        "run_time": 10,
-                    })
-                    current_time += 10
-
-            estimated_wips = (
-                await db.execute(
-                    select(EstimatedWips)
-                    .where(EstimatedWips.lazer_cutting_id == cut.id)
-                    .order_by(EstimatedWips.id.asc())
-                )
-            ).scalars().all()
-
-            for est_wip in estimated_wips:
-                realized_wip = None
-                if est_wip.qr_id:
-                    realized_wip = (
-                        await db.execute(select(SteelWip).where(SteelWip.qr_id == est_wip.qr_id))
-                    ).scalars().first()
-                if realized_wip is None:
-                    realized_wip = SteelWip(
-                        status=WipStatus.REGISTERED.value,
-                        manufacturer=est_wip.manufacturer or (source_wip.manufacturer if source_wip else "POSCO"),
-                        material=est_wip.material or (source_wip.material if source_wip else "UNKNOWN"),
-                        thickness=est_wip.thickness or 0.0,
-                        width=est_wip.width or 0.0,
-                        length=est_wip.length or 0.0,
-                        weight=est_wip.weight or 0.0,
-                        location_id=None,
-                        stack_level=None,
-                        qr_id=est_wip.qr_id,
-                    )
-                    db.add(realized_wip)
-                    await db.flush()
-
-                inbound_dest = None
-                if inbound_destinations:
-                    inbound_dest = inbound_destinations[inbound_dest_idx % len(inbound_destinations)]
-                    inbound_dest_idx += 1
-                temp_items.append(
-                    {
-                        "steel_wip_id": realized_wip.id,
-                        "action": BatchActionType.INBOUND.value,
-                        "from": None,
-                        "to": inbound_dest,
-                        "start_time": current_time + (cut.estimated_cutting_time or 0),
-                        "run_time": 5,
-                    }
-                )
-
+                
         temp_items.sort(key=lambda item: (item["start_time"], item["action"], item["steel_wip_id"]))
         for item_order, item in enumerate(temp_items, start=1):
             db.add(
