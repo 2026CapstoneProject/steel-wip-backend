@@ -1,13 +1,13 @@
 # app/algorithms/dummy_optimizer.py
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, delete
 from typing import List
 import random
 
 from app.models import (
     LazerCutting, Batch, BatchItems, SteelWip,
     Scenarios, EstimatedWips, Locations,
-    BatchItemsBatchItemAction, BatchItemsStatus, SteelWipStatus
+    BatchItemsBatchItemAction, BatchItemsStatus, SteelWipStatus, QrCodes
 )
 
 # 원자재 판별 기준 (width x length, mm 단위)
@@ -35,6 +35,38 @@ async def run_asis_optimization(db: AsyncSession, scenario_id: int):
         raise ValueError("시나리오를 찾을 수 없습니다.")
 
     scenario.status = "DRAFT"
+    # ── 기존 Batch/BatchItems 삭제 (중복 방지) ──────────────────────
+    existing_batch_ids = (
+        await db.execute(select(Batch.id).where(Batch.scenario_id == scenario_id))
+    ).scalars().all()
+
+    if existing_batch_ids:
+        await db.execute(delete(BatchItems).where(BatchItems.batch_id.in_(existing_batch_ids)))
+        await db.execute(delete(Batch).where(Batch.id.in_(existing_batch_ids)))
+
+    # ── 기존 EstimatedWips에서 REGISTERED 상태로 생성된 SteelWip 삭제 ──
+    cutting_ids = (
+        await db.execute(select(LazerCutting.id).where(LazerCutting.scenario_id == scenario_id))
+    ).scalars().all()
+
+    if cutting_ids:
+        qr_ids = (
+            await db.execute(
+                select(EstimatedWips.qr_id).where(
+                    EstimatedWips.lazer_cutting_id.in_(cutting_ids),
+                    EstimatedWips.qr_id.is_not(None),
+                )
+            )
+        ).scalars().all()
+
+        if qr_ids:
+            await db.execute(
+                delete(SteelWip).where(
+                    SteelWip.qr_id.in_(qr_ids),
+                    SteelWip.status == SteelWipStatus.REGISTERED.value,
+                )
+            )
+    # ───────────────────────────────────────────────────────────────
 
     stmt = select(LazerCutting).where(LazerCutting.scenario_id == scenario_id)
     result = await db.execute(stmt)
