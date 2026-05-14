@@ -135,3 +135,7 @@ class SentProjectHistory(BaseModel):
     projectTitle: str
     projectDue: date
     scenarios: List[SentScenarioItem]
+
+class NcCodeUpdateRequest(BaseModel):
+    batchItemId: int
+    ncCode: str

@@ -162,7 +162,7 @@ async def get_scenario_result(db: AsyncSession, scenario_id: int) -> list:
                 )
                 lc = (await db.execute(lc_stmt)).scalars().first()
                 nc_code = lc.nc_code if lc else None
-                
+
             # Location 명칭 치환
             from_loc = await db.get(Locations, item.from_location) if item.from_location else None
             to_loc = await db.get(Locations, item.to_location) if item.to_location else None
@@ -505,3 +505,39 @@ async def get_sent_scenario_history(
 
     # 4. Dictionary를 List 객체 형태로 반환
     return [SentProjectHistory(**data) for data in projects_map.values()]
+
+
+
+
+async def update_nc_code(db: AsyncSession, scenario_id: int, batch_item_id: int, nc_code: str):
+    """PATCH: 특정 BatchItem에 연결된 LazerCutting의 NC코드 수정"""
+
+    # 1. BatchItem 존재 + 해당 scenario 소속 확인
+    item_stmt = (
+        select(BatchItems)
+        .join(Batch, BatchItems.batch_id == Batch.id)
+        .where(
+            BatchItems.id == batch_item_id,
+            Batch.scenario_id == scenario_id,
+        )
+    )
+    item = (await db.execute(item_stmt)).scalars().first()
+    if not item:
+        raise ValueError("해당 시나리오에서 BatchItem을 찾을 수 없습니다.")
+
+    # 2. steel_wip_id + batch_id로 LazerCutting 조회
+    lc_stmt = select(LazerCutting).where(
+        LazerCutting.steel_wip_id == item.steel_wip_id,
+        LazerCutting.batch_id == item.batch_id,
+    )
+    lc = (await db.execute(lc_stmt)).scalars().first()
+    if not lc:
+        raise ValueError("해당 BatchItem에 연결된 LazerCutting을 찾을 수 없습니다.")
+
+    # 3. NC코드 업데이트
+    lc.nc_code = nc_code
+    db.add(lc)
+    await db.commit()
+    await db.refresh(lc)
+
+    return {"lazerCuttingId": lc.id, "ncCode": lc.nc_code}

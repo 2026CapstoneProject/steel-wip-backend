@@ -10,6 +10,7 @@ from app.services import scenario_service
 # app/routers/scenarios.py
 from typing import List
 from app.schemas.scenario import ScenarioResultData
+from app.schemas.scenario import NcCodeUpdateRequest
 
 router = APIRouter()
 
@@ -53,6 +54,25 @@ async def delete_scenario(scenario_id: int, db: AsyncSession = Depends(get_db)):
             status=200,
             message="시나리오 및 관련 데이터가 모두 삭제되었습니다.",
             data=None
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    
+# NC코드 수정 (PATCH)
+@router.patch("/{scenario_id}/nc-code", response_model=BaseResponse)
+async def update_nc_code(
+    scenario_id: int,
+    request: NcCodeUpdateRequest,
+    db: AsyncSession = Depends(get_db)
+):
+    try:
+        result = await scenario_service.update_nc_code(
+            db, scenario_id, request.batchItemId, request.ncCode
+        )
+        return BaseResponse(
+            status=200,
+            message="NC코드가 수정되었습니다.",
+            data=result
         )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
