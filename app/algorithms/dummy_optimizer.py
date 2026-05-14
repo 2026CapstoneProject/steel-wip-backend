@@ -17,6 +17,12 @@ RAW_MATERIAL_SIZES = {
     (12192, 2438),
 }
 
+# 재배치/적재 더미 소요시간 (단위: 분)
+RELOCATE_TIME_MIN = 5
+RELOCATE_TIME_MAX = 10
+INBOUND_TIME_MIN = 5
+INBOUND_TIME_MAX = 10
+
 def is_raw_material(wip: SteelWip) -> bool:
     return (round(wip.width), round(wip.length)) in RAW_MATERIAL_SIZES
 
@@ -88,6 +94,7 @@ async def run_asis_optimization(db: AsyncSession, scenario_id: int):
                 already_picked.add(target_wip.id)
 
                 if is_raw_material(target_wip):
+                    # ===== 원자재: 바로 피킹 =====
                     picking_dest = PICKING_DESTINATIONS[picking_dest_idx % len(PICKING_DESTINATIONS)]
                     picking_dest_idx += 1
                     temp_batch_items.append({
@@ -101,6 +108,7 @@ async def run_asis_optimization(db: AsyncSession, scenario_id: int):
                     current_time += (cut.estimated_cutting_time or 0)
 
                 else:
+                    # ===== 재공품: 위 자재 재배치 후 피킹 =====
                     top_wips_stmt = select(SteelWip).where(
                         and_(
                             SteelWip.location_id == target_wip.location_id,
@@ -119,7 +127,7 @@ async def run_asis_optimization(db: AsyncSession, scenario_id: int):
                             "from": top_wip.location_id,
                             "to": relocate_dest,
                             "start_time": current_time,
-                            "run_time": None,
+                            "run_time": random.randint(RELOCATE_TIME_MIN, RELOCATE_TIME_MAX),
                         })
 
                     picking_dest = PICKING_DESTINATIONS[picking_dest_idx % len(PICKING_DESTINATIONS)]
@@ -134,6 +142,7 @@ async def run_asis_optimization(db: AsyncSession, scenario_id: int):
                     })
                     current_time += (cut.estimated_cutting_time or 0)
 
+            # ── 적재(INBOUND): EstimatedWips가 있는 경우에만 ──
             est_wips_stmt = select(EstimatedWips).where(
                 EstimatedWips.lazer_cutting_id == cut.id
             )
@@ -164,7 +173,7 @@ async def run_asis_optimization(db: AsyncSession, scenario_id: int):
                     "from": None,
                     "to": inbound_dest,
                     "start_time": inbound_start_time,
-                    "run_time": None,
+                    "run_time": random.randint(INBOUND_TIME_MIN, INBOUND_TIME_MAX),
                 })
 
         temp_batch_items.sort(key=lambda x: x["start_time"])
