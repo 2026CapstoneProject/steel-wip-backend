@@ -93,6 +93,7 @@ class ScenarioResultData(BaseModel):
     scenarioTitle: str
     scenarioDue: date
     lazerName: str
+    status: Optional[str] = None
     totalCuttingTime: int
     totalWipNum: int
     totalCraneMove: int
@@ -129,8 +130,9 @@ class SentScenarioItem(BaseModel):
     scenarioTitle: str
     scenarioDue: date
     orderedAt: datetime
-    numInputWip: int  # 생산 계획으로 세운 투입 WIPs 개수 (PICKING 배치 아이템 수)
-
+    numInputWip: int
+    status: Optional[str]
+    
 class SentProjectHistory(BaseModel):
     projectId: int
     projectTitle: str

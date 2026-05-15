@@ -203,6 +203,7 @@ async def get_scenario_result(db: AsyncSession, scenario_id: int) -> list:
         scenarioTitle=scenario.title,
         scenarioDue=scenario.scenario_due,
         lazerName=(scenario.lazer_name.value if hasattr(scenario.lazer_name, 'value') else (scenario.lazer_name or "LAZER1")),
+        status=(scenario.status.value if hasattr(scenario.status, 'value') else (scenario.status or "")),
         totalCuttingTime=total_cutting_time,
         totalWipNum=total_wip_num,
         totalCraneMove=total_move_num,
@@ -214,7 +215,6 @@ async def get_scenario_result(db: AsyncSession, scenario_id: int) -> list:
     )
     
     return [result_data]
-
 
 
 async def delete_scenario_cascade(db: AsyncSession, scenario_id: int):
@@ -229,8 +229,16 @@ async def delete_scenario_cascade(db: AsyncSession, scenario_id: int):
         qr_ids = [q for q in wips if q]
         
         await db.execute(delete(EstimatedWips).where(EstimatedWips.lazer_cutting_id.in_(cuttings)))
+        
         if qr_ids:
+            # ✅ [추가] QrCodes 삭제 전, steel_wip의 qr_id 참조를 먼저 NULL로 해제
+            await db.execute(
+                update(SteelWip)
+                .where(SteelWip.qr_id.in_(qr_ids))
+                .values(qr_id=None)
+            )
             await db.execute(delete(QrCodes).where(QrCodes.id.in_(qr_ids)))
+        
         await db.execute(delete(LazerCutting).where(LazerCutting.scenario_id == scenario_id))
 
     batches = (await db.execute(select(Batch.id).where(Batch.scenario_id == scenario_id))).scalars().all()
@@ -499,7 +507,8 @@ async def get_sent_scenario_history(
             scenarioTitle=scenario.title,
             scenarioDue=scenario.scenario_due,
             orderedAt=scenario.ordered_at or scenario.created_at,
-            numInputWip=num_input_wip
+            numInputWip=num_input_wip,
+            status=(scenario.status.value if hasattr(scenario.status, "value") else (scenario.status or "-"))
         )
         
         projects_map[project.id]["scenarios"].append(scenario_item)
