@@ -529,10 +529,11 @@ async def get_field_progress(db: AsyncSession) -> list:
     batch_remaining = max(batch_total - batch_completed, 0)
 
     if not lazer_cuttings:
-        # 재공품 없는 배치 → 생산완료 버튼 클릭 전까지 100%가 되면 안 됨
-        # batch.completed_at이 없으면 아직 완료 처리 전 → 최대 0.99로 캡
+        # 재공품 없는 배치: 생산완료 버튼 클릭 전까지 절대 100%가 되면 안 됨
+        # → 분모에 1을 추가해서 항상 100% 미만으로 유지
         if batch.completed_at is None:
-            batch_progress_rate = min(batch_progress_rate, 0.99)
+            batch_progress_rate = round(batch_completed / (batch_total + 1), 2)  # ← 여기만 변경
+            batch_remaining = 1  # 생산완료 버튼이 남아있음을 표현
 
         return [FieldProgressData(
             scenarioId=scenario.id,
