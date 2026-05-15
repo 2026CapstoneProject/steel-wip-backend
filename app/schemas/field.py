@@ -138,7 +138,8 @@ class FieldProgressData(BaseModel):
     remainingTaskCount: int = 0
     expectedTotalRunningTime: int          # 모든 lazer_cutting.estimated_cutting_time 합산 (분)
     lazer_cutting: List[ProgressLazerCutting]
-
+    hasNoWip: bool = False 
+    batchId: Optional[int] = None
 
 # ─────────────────────────────────────────────
 # 생산 준비 화면 (GET /api/field/ready)

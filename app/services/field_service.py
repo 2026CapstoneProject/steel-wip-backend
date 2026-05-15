@@ -140,6 +140,18 @@ async def _is_batch_completed(db: AsyncSession, batch_id: int) -> bool:
 
     return total == completed
 
+# ✅ 신규 추가 — Batch 완료 처리 (completed_at 기록)
+async def _complete_batch(db: AsyncSession, batch_id: int) -> None:
+    """
+    Batch의 모든 BatchItem이 COMPLETED 상태가 됐을 때 호출.
+    Batch.completed_at을 현재 시각으로 기록한다.
+    이미 completed_at이 있는 경우 멱등성 보장(재호출 시 무시).
+    """
+    batch = await db.get(Batch, batch_id)
+    if not batch or batch.completed_at is not None:
+        return
+    batch.completed_at = datetime.now(timezone.utc)
+    await db.commit()
 
 async def _get_current_active_scenario(db: AsyncSession) -> Optional[Scenarios]:
     """
@@ -226,7 +238,7 @@ async def _get_active_ready_batch(db: AsyncSession, scenario_id: int) -> Optiona
 
     return None
 
-
+# ✅ 변경 후
 async def _get_active_processing_batch(db: AsyncSession, scenario_id: int) -> Optional[Batch]:
     all_batches_stmt = (
         select(Batch)
@@ -236,25 +248,26 @@ async def _get_active_processing_batch(db: AsyncSession, scenario_id: int) -> Op
     all_batches = (await db.execute(all_batches_stmt)).scalars().all()
 
     for batch in all_batches:
+        # 이미 완료된 배치(completed_at이 있는 것)는 건너뜀
+        if batch.completed_at is not None:
+            continue
+
         pending_ready_count = await _count_incomplete_items_in_batch_actions(
             db,
             batch.id,
             ["RELOCATE", "PICKING"],
         )
         if pending_ready_count > 0:
+            # RELOCATE/PICKING 작업이 남아 있으면 아직 준비 단계 → 생산 중 아님
             return None
 
         pending_total = await _count_incomplete_items_in_batch(db, batch.id)
         if pending_total == 0:
+            # 모든 아이템 완료인데 completed_at이 없는 경우 → 아래 _complete_batch 로직이 아직 안 돌았을 수 있으나 건너뜀
             continue
 
-        pending_inbound_count = await _count_incomplete_items_in_batch(
-            db,
-            batch.id,
-            action="INBOUND",
-        )
-        if pending_inbound_count > 0:
-            return batch
+        # RELOCATE/PICKING이 모두 끝난 상태 → 생산 중 (INBOUND 유무와 관계없이 반환)
+        return batch
 
     return None
 
@@ -493,8 +506,6 @@ async def get_field_progress(db: AsyncSession) -> list:
         .order_by(LazerCutting.id)
     )
     lazer_cuttings = (await db.execute(lc_stmt)).scalars().all()
-    if not lazer_cuttings:
-        return []
 
     # ── 4. 총 예상 소요 시간 (분) ────────────────────────────────────────
     expected_total = sum(lc.estimated_cutting_time or 0 for lc in lazer_cuttings)
@@ -508,6 +519,21 @@ async def get_field_progress(db: AsyncSession) -> list:
     batch_progress_rate = round(batch_completed / batch_total, 2) if batch_total > 0 else 0.0
     batch_remaining = max(batch_total - batch_completed, 0)
 
+    # lazer_cutting이 없으면 (재공품 없는 배치) 빈 lc_groups와 hasNoWip=True로 반환
+    if not lazer_cuttings:
+        return [FieldProgressData(
+            scenarioId=scenario.id,
+            scenarioTitle=scenario.title,
+            batchProgressRate=batch_progress_rate,
+            completedTaskCount=batch_completed,
+            totalTaskCount=batch_total,
+            remainingTaskCount=batch_remaining,
+            expectedTotalRunningTime=0,
+            lazer_cutting=[],
+            hasNoWip=True,
+            batchId=batch.id,
+        )]
+    
     # ── 5. 각 lazer_cutting별 데이터 구성 ───────────────────────────────
     lc_groups: list[ProgressLazerCutting] = []
 
@@ -614,6 +640,8 @@ async def get_field_progress(db: AsyncSession) -> list:
         remainingTaskCount=batch_remaining,
         expectedTotalRunningTime=expected_total,
         lazer_cutting=lc_groups,
+        hasNoWip=False,     
+        batchId=batch.id,
     )]
 
 
@@ -936,14 +964,21 @@ async def save_qr_action(db: AsyncSession, batch_item_id: int, req: QrSaveReques
             wip.status = "IN_STOCK"
         elif action == "PICKING":
             wip.location_id = None
+            wip.status = "CONSUMED"   # ✅ 소모된 원자재/재공품 CONSUMED 처리
 
     await db.commit()
+
     remaining_after_complete = await _count_incomplete_items_in_batch(db, item.batch_id)
     pending_inbound_after_complete = await _count_incomplete_items_in_batch(
         db,
         item.batch_id,
         action="INBOUND",
     )
+
+    # ✅ 모든 BatchItem이 완료되면 Batch 완료 처리 (completed_at 기록)
+    if remaining_after_complete == 0:
+        await _complete_batch(db, item.batch_id)
+
     return QrSaveResult(
         batchItemId=item.id,
         action=action,
@@ -951,6 +986,44 @@ async def save_qr_action(db: AsyncSession, batch_item_id: int, req: QrSaveReques
         currentBatchPendingInboundCount=pending_inbound_after_complete,
         shouldMoveToReady=remaining_after_complete == 0,
     )
+
+# 재공품 없는 Batch의 수동 생산완료 처리
+async def complete_batch_manually(db: AsyncSession, batch_id: int) -> None:
+    """
+    재공품(lazer_cutting)이 없는 Batch에서 프론트의 '생산완료' 버튼 클릭 시 호출.
+    1. 해당 Batch의 미완료 BatchItem(PICKING)을 모두 COMPLETED 처리
+    2. PICKING에 연결된 SteelWip.status = CONSUMED
+    3. Batch.completed_at 기록
+    """
+    batch = await db.get(Batch, batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="배치를 찾을 수 없습니다.")
+    if batch.completed_at is not None:
+        return  # 이미 완료된 배치 → 멱등성 보장
+
+    # 미완료 BatchItem 전체 조회
+    items_stmt = select(BatchItems).where(
+        BatchItems.batch_id == batch_id,
+        BatchItems.status != "COMPLETED",
+    )
+    items = (await db.execute(items_stmt)).scalars().all()
+
+    now = datetime.now(timezone.utc)
+    for item in items:
+        item.status = "COMPLETED"
+        item.item_scanned_at = item.item_scanned_at or now
+        item.destination_scanned_at = item.destination_scanned_at or now
+
+        if item.steel_wip_id:
+            wip = await db.get(SteelWip, item.steel_wip_id)
+            if wip and item.batch_item_action == "PICKING":
+                wip.location_id = None
+                wip.status = "CONSUMED"
+
+    # Batch 완료 처리
+    batch.completed_at = now
+    await db.commit()
+
 async def complete_scenario(db: AsyncSession, scenario_id: int) -> None:
     """
     시나리오 작업 완료 처리.
