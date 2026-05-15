@@ -262,11 +262,20 @@ async def _get_active_processing_batch(db: AsyncSession, scenario_id: int) -> Op
             return None
 
         pending_total = await _count_incomplete_items_in_batch(db, batch.id)
-        if pending_total == 0:
-            # 모든 아이템 완료인데 completed_at이 없는 경우 → 아래 _complete_batch 로직이 아직 안 돌았을 수 있으나 건너뜀
-            continue
 
-        # RELOCATE/PICKING이 모두 끝난 상태 → 생산 중 (INBOUND 유무와 관계없이 반환)
+        # ✅ 핵심 수정:
+        # pending_total == 0인 경우 두 가지를 구분해야 함:
+        #   A) PICKING/RELOCATE만 있고 모두 완료 + INBOUND 없음 = 재공품 없는 배치 → "생산 중" 상태로 반환
+        #   B) 모든 아이템(INBOUND 포함) 완료 = 이미 끝난 배치 → continue
+        if pending_total == 0:
+            if batch.completed_at is None:
+                # completed_at이 아직 없음 = 재공품 없는 배치가 PICKING까지만 완료된 상태
+                return batch
+            else:
+                # completed_at이 있음 = 완전히 끝난 배치
+                continue
+
+        # RELOCATE/PICKING이 끝나고 INBOUND가 남아있음 → 생산 중 (재공품 있는 케이스)
         return batch
 
     return None
