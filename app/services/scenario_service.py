@@ -203,6 +203,7 @@ async def get_scenario_result(db: AsyncSession, scenario_id: int) -> list:
         scenarioTitle=scenario.title,
         scenarioDue=scenario.scenario_due,
         lazerName=(scenario.lazer_name.value if hasattr(scenario.lazer_name, 'value') else (scenario.lazer_name or "LAZER1")),
+        status=(scenario.status.value if hasattr(scenario.status, 'value') else (scenario.status or "")),
         totalCuttingTime=total_cutting_time,
         totalWipNum=total_wip_num,
         totalCraneMove=total_move_num,
