@@ -153,6 +153,41 @@ async def _complete_batch(db: AsyncSession, batch_id: int) -> None:
     batch.completed_at = datetime.now(timezone.utc)
     await db.commit()
 
+async def _has_incomplete_no_wip_batch(db: AsyncSession, scenario_id: int) -> bool:
+    """
+    해당 시나리오에서 아직 completed_at이 없고,
+    INBOUND 아이템이 하나도 없는 배치가 존재하는지 확인.
+    → 재공품 없는 배치가 '생산완료' 버튼을 아직 누르지 않은 상태인지 판단.
+    """
+    all_batches_stmt = (
+        select(Batch)
+        .where(
+            Batch.scenario_id == scenario_id,
+            Batch.completed_at.is_(None),  # 아직 완료 안 된 배치
+        )
+    )
+    incomplete_batches = (await db.execute(all_batches_stmt)).scalars().all()
+
+    for batch in incomplete_batches:
+        # PICKING/RELOCATE가 모두 완료됐는지 확인 (생산 중 단계에 진입한 배치만)
+        pending_ready = await _count_incomplete_items_in_batch_actions(
+            db, batch.id, ["RELOCATE", "PICKING"]
+        )
+        if pending_ready > 0:
+            continue  # 아직 생산 준비 단계 → 해당 없음
+
+        # INBOUND 아이템 개수 확인
+        total_inbound_stmt = select(func.count(BatchItems.id)).where(
+            BatchItems.batch_id == batch.id,
+            BatchItems.batch_item_action == "INBOUND",
+        )
+        total_inbound = (await db.execute(total_inbound_stmt)).scalar() or 0
+
+        if total_inbound == 0:
+            return True  # 재공품 없는 미완료 배치 발견
+
+    return False
+
 async def _get_current_active_scenario(db: AsyncSession) -> Optional[Scenarios]:
     """
     현재 현장 기준이 되는 시나리오를 반환한다.
@@ -349,8 +384,12 @@ async def get_field_end(db: AsyncSession, batch_id: Optional[int] = None) -> lis
     )
     completed_count: int = (await db.execute(completed_count_stmt)).scalar() or 0
 
-    progress_rate = round(completed_count / total, 2) if total > 0 else 0.0
-    remaining_count = max(total - completed_count, 0)
+    # ✅ 재공품 없는 미완료 배치가 있으면 분모에 1 추가
+    has_incomplete_no_wip_batch = await _has_incomplete_no_wip_batch(db, scenario.id)
+    effective_total = total + (1 if has_incomplete_no_wip_batch else 0)
+
+    progress_rate = round(completed_count / effective_total, 2) if effective_total > 0 else 0.0
+    remaining_count = max(effective_total - completed_count, 0)
 
     # 4. 배치 전체가 완료된 경우에만 완료 목록에 포함한다.
     all_batches_stmt = (
@@ -716,8 +755,17 @@ async def get_field_ready(db: AsyncSession) -> list:
         )
         completed_count: int = (await db.execute(completed_count_stmt)).scalar() or 0
 
-        progress_rate = round(completed_count / total, 2) if total > 0 else 0.0
-        remaining_count = max(total - completed_count, 0)
+        has_incomplete_no_wip_batch = await _has_incomplete_no_wip_batch(db, scenario.id)
+        effective_total = total + (1 if has_incomplete_no_wip_batch else 0)
+
+        progress_rate = round(completed_count / effective_total, 2) if effective_total > 0 else 0.0
+        remaining_count = max(effective_total - completed_count, 0)
+
+        has_incomplete_no_wip_batch = await _has_incomplete_no_wip_batch(db, scenario.id)
+        effective_total = total + (1 if has_incomplete_no_wip_batch else 0)
+
+        progress_rate = round(completed_count / effective_total, 2) if effective_total > 0 else 0.0
+        remaining_count = max(effective_total - completed_count, 0)
 
         # ── 4. 현재 배치 집계 (ready / processing 기준) ──────────────────
         active_ready_batch = await _get_active_ready_batch(db, scenario.id)
