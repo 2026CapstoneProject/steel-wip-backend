@@ -93,6 +93,7 @@ class ScenarioResultData(BaseModel):
     scenarioTitle: str
     scenarioDue: date
     lazerName: str
+    status: Optional[str] = None
     totalCuttingTime: int
     totalWipNum: int
     totalCraneMove: int
