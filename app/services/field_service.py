@@ -339,6 +339,17 @@ def _build_weight_text(wip: SteelWip | None) -> str | None:
         return None
     return f"{_fmt_text_number(wip.weight)}kg"
 
+async def _get_next_stack_level(db: AsyncSession, location_id: int) -> int:
+    """
+    해당 location에 있는 SteelWip 중 stack_level 최댓값을 구하고,
+    그보다 1 높은 값을 반환한다. (비어있으면 1 반환)
+    """
+    stmt = select(func.max(SteelWip.stack_level)).where(
+        SteelWip.location_id == location_id
+    )
+    max_level = (await db.execute(stmt)).scalar()
+    return (max_level or 0) + 1
+
 # ─────────────────────────────────────────────
 # GET /api/field/end
 # ─────────────────────────────────────────────
@@ -1031,12 +1042,17 @@ async def save_qr_action(db: AsyncSession, batch_item_id: int, req: QrSaveReques
     if wip is not None:
         if action == "RELOCATE":
             wip.location_id = item.to_location
+            if item.to_location is not None:
+                wip.stack_level = await _get_next_stack_level(db, item.to_location)
         elif action == "INBOUND":
             wip.location_id = item.to_location
             wip.status = "IN_STOCK"
+            if item.to_location is not None:
+                wip.stack_level = await _get_next_stack_level(db, item.to_location)
         elif action == "PICKING":
             wip.location_id = None
-            wip.status = "CONSUMED"   # ✅ 소모된 원자재/재공품 CONSUMED 처리
+            wip.stack_level = None   # ← 레이저 투입 시 stack_level도 초기화
+            wip.status = "CONSUMED"
 
     await db.commit()
 
