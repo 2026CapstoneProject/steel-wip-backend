@@ -665,6 +665,23 @@ async def delete_lantek_data(db: AsyncSession, scenario_id: int) -> None:
             )
             await db.execute(delete(QrCodes).where(QrCodes.id.in_(qr_ids)))
 
+        # ✅ [추가] RAW_MATERIAL WIP 삭제 (qr_id=None으로 생성된 원자재)
+        raw_wip_ids = (
+            await db.execute(
+                select(SteelWip.id).where(
+                    SteelWip.id.in_(
+                        select(LazerCutting.steel_wip_id).where(
+                            LazerCutting.id.in_(cutting_ids),
+                            LazerCutting.steel_wip_id.is_not(None),
+                        )
+                    ),
+                    SteelWip.status == WipStatus.RAW_MATERIAL.value,
+                )
+            )
+        ).scalars().all()
+        if raw_wip_ids:
+            await db.execute(delete(SteelWip).where(SteelWip.id.in_(raw_wip_ids)))
+
         # 5. LazerCutting 삭제
         await db.execute(delete(LazerCutting).where(LazerCutting.scenario_id == scenario_id))
 
