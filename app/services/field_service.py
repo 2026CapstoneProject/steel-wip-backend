@@ -985,8 +985,21 @@ async def save_qr_action(db: AsyncSession, batch_item_id: int, req: QrSaveReques
     )
 
     # ✅ 모든 BatchItem이 완료되면 Batch 완료 처리 (completed_at 기록)
+    # 모든 BatchItem이 COMPLETED가 됐을 때 자동 완료 처리
+    # 단, 재공품이 없는 배치(INBOUND 아이템이 하나도 없는 경우)는
+    # 작업자가 직접 "생산완료" 버튼을 눌러야 하므로 여기서 자동 완료하지 않는다.
     if remaining_after_complete == 0:
-        await _complete_batch(db, item.batch_id)
+        # 해당 배치에 INBOUND 아이템이 하나라도 있는지 확인
+        total_inbound_stmt = select(func.count(BatchItems.id)).where(
+            BatchItems.batch_id == item.batch_id,
+            BatchItems.batch_item_action == "INBOUND",
+        )
+        total_inbound = (await db.execute(total_inbound_stmt)).scalar() or 0
+
+        if total_inbound > 0:
+            # 재공품이 있는 배치 → 모든 INBOUND까지 완료됐으므로 자동 완료
+            await _complete_batch(db, item.batch_id)
+        # 재공품이 없는 배치 → 자동 완료하지 않음. complete_batch_manually()에서만 완료 처리.
 
     return QrSaveResult(
         batchItemId=item.id,
