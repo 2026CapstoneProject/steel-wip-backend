@@ -528,12 +528,16 @@ async def get_field_progress(db: AsyncSession) -> list:
     batch_progress_rate = round(batch_completed / batch_total, 2) if batch_total > 0 else 0.0
     batch_remaining = max(batch_total - batch_completed, 0)
 
-    # lazer_cutting이 없으면 (재공품 없는 배치) 빈 lc_groups와 hasNoWip=True로 반환
     if not lazer_cuttings:
+        # 재공품 없는 배치 → 생산완료 버튼 클릭 전까지 100%가 되면 안 됨
+        # batch.completed_at이 없으면 아직 완료 처리 전 → 최대 0.99로 캡
+        if batch.completed_at is None:
+            batch_progress_rate = min(batch_progress_rate, 0.99)
+
         return [FieldProgressData(
             scenarioId=scenario.id,
             scenarioTitle=scenario.title,
-            batchProgressRate=batch_progress_rate,
+            batchProgressRate=batch_progress_rate,   # ← 최대 99%
             completedTaskCount=batch_completed,
             totalTaskCount=batch_total,
             remainingTaskCount=batch_remaining,
