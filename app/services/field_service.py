@@ -528,26 +528,36 @@ async def get_field_progress(db: AsyncSession) -> list:
     batch_progress_rate = round(batch_completed / batch_total, 2) if batch_total > 0 else 0.0
     batch_remaining = max(batch_total - batch_completed, 0)
 
-    if not lazer_cuttings:
-        # 재공품 없는 배치: 생산완료 버튼 클릭 전까지 절대 100%가 되면 안 됨
-        # → 분모에 1을 추가해서 항상 100% 미만으로 유지
-        if batch.completed_at is None:
-            batch_progress_rate = round(batch_completed / (batch_total + 1), 2)  # ← 여기만 변경
-            batch_remaining = 1  # 생산완료 버튼이 남아있음을 표현
+    # ── INBOUND 아이템 존재 여부 확인 (발생 재공품 유무 최종 판단) ──
+    pending_inbound_count = await _count_incomplete_items_in_batch(
+        db, batch.id, action="INBOUND"
+    )
+    total_inbound_count_stmt = select(func.count(BatchItems.id)).where(
+        BatchItems.batch_id == batch.id,
+        BatchItems.batch_item_action == "INBOUND",
+    )
+    total_inbound_count = (await db.execute(total_inbound_count_stmt)).scalar() or 0
 
+    # lazer_cutting이 없거나, 있어도 INBOUND 아이템이 하나도 없는 경우 → hasNoWip
+    has_no_wip = (not lazer_cuttings) or (total_inbound_count == 0)
+
+    if has_no_wip:
+        if batch.completed_at is None:
+            batch_progress_rate = round(batch_completed / (batch_total + 1), 2)
+            batch_remaining = 1
         return [FieldProgressData(
             scenarioId=scenario.id,
             scenarioTitle=scenario.title,
-            batchProgressRate=batch_progress_rate,   # ← 최대 99%
+            batchProgressRate=batch_progress_rate,
             completedTaskCount=batch_completed,
             totalTaskCount=batch_total,
             remainingTaskCount=batch_remaining,
-            expectedTotalRunningTime=0,
-            lazer_cutting=[],
+            expectedTotalRunningTime=expected_total,
+            lazer_cutting=[],        # 어차피 버튼만 보여주면 되므로 빈 배열
             hasNoWip=True,
             batchId=batch.id,
         )]
-    
+
     # ── 5. 각 lazer_cutting별 데이터 구성 ───────────────────────────────
     lc_groups: list[ProgressLazerCutting] = []
 
