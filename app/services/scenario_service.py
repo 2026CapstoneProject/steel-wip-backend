@@ -507,7 +507,8 @@ async def get_sent_scenario_history(
             scenarioTitle=scenario.title,
             scenarioDue=scenario.scenario_due,
             orderedAt=scenario.ordered_at or scenario.created_at,
-            numInputWip=num_input_wip
+            numInputWip=num_input_wip,
+            status=(scenario.status.value if hasattr(scenario.status, "value") else (scenario.status or "-"))
         )
         
         projects_map[project.id]["scenarios"].append(scenario_item)
