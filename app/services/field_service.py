@@ -459,9 +459,14 @@ async def get_live_field_data(db: AsyncSession, lazer_name: str) -> List[FieldBa
         select(BatchItems)
         .where(
             BatchItems.batch_id.in_(batch_ids),
-            BatchItems.status.in_(["PENDING", "IN_PROGRESS"]),  # ← 추가
+            # COMPLETED도 포함 — 카드는 유지하고 배지만 바꿈
+            # (시나리오 자체가 COMPLETED될 때 위의 scenario 쿼리에서 이미 필터됨)
         )
-        .order_by(BatchItems.batch_id.asc(), BatchItems.batch_item_order.asc(), BatchItems.expected_start_time.asc())
+        .order_by(
+            BatchItems.batch_id.asc(),
+            BatchItems.batch_item_order.asc(),
+            BatchItems.expected_start_time.asc()
+        )
     )
     batch_items = (await db.execute(item_stmt)).scalars().all()
 
