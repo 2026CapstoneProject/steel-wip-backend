@@ -218,6 +218,9 @@ class QrSaveRequest(BaseModel):
     """
     wipQR: Optional[str] = None
     locQR: Optional[str] = None
+    thickness: Optional[float] = None   # 작업자 수정 두께
+    width: Optional[float] = None       # 작업자 수정 폭
+    length: Optional[float] = None      # 작업자 수정 길이
 
 
 class QrSaveResult(BaseModel):

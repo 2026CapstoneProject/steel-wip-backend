@@ -1040,6 +1040,13 @@ async def save_qr_action(db: AsyncSession, batch_item_id: int, req: QrSaveReques
     item.status = "COMPLETED"
 
     if wip is not None:
+        if req.thickness is not None:
+            wip.thickness = req.thickness
+        if req.width is not None:
+            wip.width = req.width
+        if req.length is not None:
+            wip.length = req.length
+        
         if action == "RELOCATE":
             wip.location_id = item.to_location
             if item.to_location is not None:
