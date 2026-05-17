@@ -13,9 +13,11 @@ class Base(DeclarativeBase):
 
 
 class BatchItemsBatchItemAction(str, enum.Enum):
-    RELOCATE = 'RELOCATE'
-    PICKING = 'PICKING'
-    INBOUND = 'INBOUND'
+    RELOCATE  = 'RELOCATE'
+    PICKING   = 'PICKING'
+    INBOUND   = 'INBOUND'
+    TEMP_MOVE = 'TEMP_MOVE'
+    RESTORE   = 'RESTORE'
 
 
 class BatchItemsStatus(str, enum.Enum):
@@ -88,6 +90,21 @@ class Projects(Base):
     project_due: Mapped[datetime.date] = mapped_column(Date, nullable=False)
 
     scenarios: Mapped[list['Scenarios']] = relationship('Scenarios', back_populates='project')
+
+
+class RawMaterialSpecs(Base):
+    __tablename__ = 'raw_material_specs'
+    __table_args__ = (
+        Index('ix_raw_material_specs_active', 'is_active'),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    material: Mapped[str] = mapped_column(String(255), nullable=False)
+    thickness: Mapped[float] = mapped_column(Float, nullable=False)
+    width: Mapped[float] = mapped_column(Float, nullable=False)
+    length: Mapped[float] = mapped_column(Float, nullable=False)
+    is_active: Mapped[int] = mapped_column(TINYINT(1), nullable=False, server_default=text("'1'"))
+    description: Mapped[Optional[str]] = mapped_column(String(255))
 
 
 class QrCodes(Base):
@@ -221,10 +238,13 @@ class BatchItems(Base):
         ForeignKeyConstraint(['from_location'], ['locations.id'], name='batch_items_ibfk_3'),
         ForeignKeyConstraint(['steel_wip_id'], ['steel_wip.id'], name='batch_items_ibfk_2'),
         ForeignKeyConstraint(['to_location'], ['locations.id'], name='batch_items_ibfk_4'),
+        # ✅ INBOUND와 EstimatedWips 연결
+        ForeignKeyConstraint(['estimated_wip_id'], ['estimated_wips.id'], name='batch_items_ibfk_5'),
         Index('ix_batch_items_batch_id', 'batch_id'),
         Index('ix_batch_items_from_location', 'from_location'),
         Index('ix_batch_items_steel_wip_id', 'steel_wip_id'),
-        Index('ix_batch_items_to_location', 'to_location')
+        Index('ix_batch_items_to_location', 'to_location'),
+        Index('ix_batch_items_estimated_wip_id', 'estimated_wip_id'),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -232,6 +252,8 @@ class BatchItems(Base):
     batch_item_action: Mapped[BatchItemsBatchItemAction] = mapped_column(Enum(BatchItemsBatchItemAction, values_callable=lambda cls: [member.value for member in cls]), nullable=False)
     status: Mapped[BatchItemsStatus] = mapped_column(Enum(BatchItemsStatus, values_callable=lambda cls: [member.value for member in cls]), nullable=False, server_default=text("'PENDING'"))
     steel_wip_id: Mapped[Optional[int]] = mapped_column(Integer)
+    # ✅ INBOUND의 발생 재공품 정보 참조
+    estimated_wip_id: Mapped[Optional[int]] = mapped_column(Integer, comment='INBOUND 시 EstimatedWips 참조')
     batch_item_order: Mapped[Optional[int]] = mapped_column(Integer)
     from_location: Mapped[Optional[int]] = mapped_column(Integer, comment='INBOUND 시 null')
     to_location: Mapped[Optional[int]] = mapped_column(Integer, comment='PICK_OUT 시 null')
@@ -244,6 +266,8 @@ class BatchItems(Base):
     locations: Mapped[Optional['Locations']] = relationship('Locations', foreign_keys=[from_location], back_populates='batch_items_from_location')
     steel_wip: Mapped[Optional['SteelWip']] = relationship('SteelWip', back_populates='batch_items')
     locations_: Mapped[Optional['Locations']] = relationship('Locations', foreign_keys=[to_location], back_populates='batch_items_to_location')
+    # ✅ EstimatedWips 관계
+    estimated_wip: Mapped[Optional['EstimatedWips']] = relationship('EstimatedWips', back_populates='batch_items')
 
 
 class LazerCutting(Base):
@@ -298,6 +322,8 @@ class EstimatedWips(Base):
 
     lazer_cutting: Mapped[Optional['LazerCutting']] = relationship('LazerCutting', back_populates='estimated_wips')
     qr: Mapped[Optional['QrCodes']] = relationship('QrCodes', back_populates='estimated_wips')
+    # ✅ INBOUND BatchItems와의 역관계
+    batch_items: Mapped[list['BatchItems']] = relationship('BatchItems', back_populates='estimated_wip')
 
 class TokenBlacklist(Base):
     __tablename__ = 'token_blacklist'
