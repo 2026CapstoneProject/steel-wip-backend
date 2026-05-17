@@ -10,6 +10,7 @@ from typing import List, Optional
 
 class RelocationBatchItem(BaseModel):
     batchItemId: int
+    actionType: str = "RELOCATE"
     wipId: int
     wipQr: Optional[str] = None
     manufacturer: Optional[str] = None
@@ -19,10 +20,12 @@ class RelocationBatchItem(BaseModel):
     fromLocationName: Optional[str] = None
     toLocationName: Optional[str] = None
     expectedRunningTime: int
+    expectedStartTime: int = 0
 
 
 class PickingBatchItem(BaseModel):
     batchItemId: int
+    actionType: str = "PICKING"
     wipId: int
     wipQr: Optional[str] = None
     manufacturer: Optional[str] = None
@@ -32,6 +35,7 @@ class PickingBatchItem(BaseModel):
     fromLocationName: Optional[str] = None
     toLocationName: Optional[str] = None
     expectedRunningTime: int = 0
+    expectedStartTime: int = 0
     thickness: Optional[float] = None
     width: Optional[float] = None
     height: Optional[float] = None
@@ -39,6 +43,7 @@ class PickingBatchItem(BaseModel):
 
 class InboundBatchItem(BaseModel):
     batchItemId: int
+    actionType: str = "INBOUND"
     wipId: int
     wipQr: Optional[str] = None
     manufacturer: Optional[str] = None
@@ -48,6 +53,7 @@ class InboundBatchItem(BaseModel):
     fromLocationName: Optional[str] = None
     toLocationName: Optional[str] = None
     expectedRunningTime: int = 0
+    expectedStartTime: int = 0
     thickness: Optional[float] = None
     width: Optional[float] = None
     height: Optional[float] = None
@@ -140,6 +146,7 @@ class FieldProgressData(BaseModel):
     lazer_cutting: List[ProgressLazerCutting]
     hasNoWip: bool = False 
     batchId: Optional[int] = None
+    canCompleteProduction: bool = False
 
 # ─────────────────────────────────────────────
 # 생산 준비 화면 (GET /api/field/ready)
@@ -160,6 +167,9 @@ class FieldReadyData(BaseModel):
     remainingTaskCount: int = 0
     currentBatchRemainingTaskCount: int = 0
     currentBatchPendingInboundCount: int = 0
+    requiresProductionCompletion: bool = False
+    blockingProductionBatchId: Optional[int] = None
+    orderedItems: List[FieldBatchItem] = Field(default_factory=list)
     batch: List[FieldBatchGroup]         # 전체 Batch 목록 (RELOCATE / PICKING 분리)
     nextScenarioId: Optional[int] = None
     nextScenarioTitle: Optional[str] = None

@@ -90,8 +90,8 @@ async def complete_batch(
     db: AsyncSession = Depends(get_db),
 ):
     """재공품 없는 Batch의 수동 생산완료 처리"""
-    await field_service.complete_batch_manually(db, batch_id)
-    return {"status": 200, "message": "생산완료 처리가 완료되었습니다.", "data": None}
+    result = await field_service.complete_batch_manually(db, batch_id)
+    return {"status": 200, "message": "생산완료 처리가 완료되었습니다.", "data": result}
 
 # ─────────────────────────────────────────────
 # GET /api/field/{batchItemId}/relocQr
@@ -144,4 +144,3 @@ async def get_live_field_dashboard(
         message="현장 실시간 정보 조회에 성공했습니다.",
         data=data
     )
-

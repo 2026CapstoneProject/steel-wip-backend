@@ -7,7 +7,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.schemas import BaseResponse
-from app.algorithms.dummy_optimizer import run_asis_optimization
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -21,20 +20,36 @@ async def call_main_solver(
     db: AsyncSession = Depends(get_db)
 ):
     """
-    AS-IS SOLVER 호출
-    - 원자재: planned_source_wip_id 기반 바로 피킹
-    - 재공품: steel_wip_id 기반 위 자재 재배치 후 피킹
-    - 잔재 발생 시 생산 예상시간 이후 적재
+    CAASDy 솔버 실행 엔드포인트
+    - CAASDy 솔버 우선 실행
+    - 실패 시 rule-based 폴백 자동 전환
+    - 기존 Batch/BatchItems 삭제 후 재생성 (replace_existing=True)
     """
     try:
-        await run_asis_optimization(db, request.scenario_id)
-        message = "AS-IS Solver 실행 완료"
+        from app.services.lantek_service import (
+            ensure_scenario_execution_plan,
+            clear_scenario_execution_plan,
+        )
+
+        # 기존 결과를 지우고 CAASDy 솔버 재실행
+        await clear_scenario_execution_plan(db, request.scenario_id)
+        ok = await ensure_scenario_execution_plan(
+            db, request.scenario_id, replace_existing=False
+        )
+        await db.commit()
+
+        if not ok:
+            raise ValueError("솔버 실행 결과가 없습니다. WIP 재고 및 LazerCutting 데이터를 확인하세요.")
+
+        message = "CAASDy 솔버 실행 완료"
+
+    except ValueError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         await db.rollback()
-        logger.exception(
-            "AS-IS solver failed for scenario %s", request.scenario_id
-        )
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        logger.exception("솔버 실패 (scenario_id=%s): %s", request.scenario_id, exc)
+        raise HTTPException(status_code=500, detail=f"솔버 실행 중 오류: {exc}") from exc
 
     return BaseResponse(
         status=200,

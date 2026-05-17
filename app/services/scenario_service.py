@@ -26,14 +26,7 @@ from app.schemas.scenario import ScenarioHistoryItem, ProjectScenarioHistory, Se
 from app.schemas.batch_item import BatchItemStatus
 from app.schemas.wip import WipStatus
 from app.services.lantek_service import ensure_scenario_execution_plan
-
-# 원자재 판별 기준 (width x length, mm 단위)
-RAW_MATERIAL_SIZES = {
-    (2438, 6096),
-    (2437, 12192),
-    (6096, 2438),
-    (12192, 2438),
-}
+from app.models import SteelWipStatus
 
 
 async def get_or_create_scenario(db: AsyncSession, project_id: int, scenario_due: date) -> Scenarios:
@@ -141,34 +134,90 @@ async def get_scenario_result(db: AsyncSession, scenario_id: int) -> list:
         items_result = (await db.execute(items_stmt)).scalars().all()
 
         for item in items_result:
-            total_move_num += 1
-            if item.batch_item_action == BatchActionType.PICKING.value:
-                total_wip_num += 1
-
-            # WIP 정보
-            wip = await db.get(SteelWip, item.steel_wip_id) if item.steel_wip_id else None
-
-            # ↓↓↓ 원자재 여부 판별 후 QR 처리 (수정된 부분) ↓↓↓
-            wip_is_raw = wip and (round(wip.width), round(wip.length)) in RAW_MATERIAL_SIZES
-            qr_code = None if wip_is_raw else (
-                await db.get(QrCodes, wip.qr_id) if wip and wip.qr_id else None
+            action_key = (
+                item.batch_item_action.value
+                if hasattr(item.batch_item_action, "value")
+                else str(item.batch_item_action)
             )
-            # ↑↑↑ 수정된 부분 끑 ↑↑↑
-            nc_code = None
-            if item.batch_item_action == BatchActionType.PICKING.value and item.steel_wip_id:
+
+            estimated_wip = None
+            wip = await db.get(SteelWip, item.steel_wip_id) if item.steel_wip_id else None
+            lc = None
+            if item.steel_wip_id:
                 lc_stmt = select(LazerCutting).where(
-                    LazerCutting.steel_wip_id == item.steel_wip_id,
                     LazerCutting.batch_id == item.batch_id,
+                    LazerCutting.steel_wip_id == item.steel_wip_id,
                 )
                 lc = (await db.execute(lc_stmt)).scalars().first()
-                nc_code = lc.nc_code if lc else None
+            if lc is None and item.estimated_wip_id:
+                estimated_for_lc = await db.get(EstimatedWips, item.estimated_wip_id)
+                if estimated_for_lc and estimated_for_lc.lazer_cutting_id:
+                    lc = await db.get(LazerCutting, estimated_for_lc.lazer_cutting_id)
+            # ✅ INBOUND인 경우 estimated_wip_id를 사용해서 EstimatedWips 조회
+            if action_key == BatchActionType.INBOUND.value and item.estimated_wip_id:
+                estimated_wip = await db.get(EstimatedWips, item.estimated_wip_id)
 
             # Location 명칭 치환
             from_loc = await db.get(Locations, item.from_location) if item.from_location else None
             to_loc = await db.get(Locations, item.to_location) if item.to_location else None
 
             # Action 이름 한글 매핑
-            action_name = "재배치" if item.batch_item_action == "RELOCATE" else "피킹" if item.batch_item_action == "PICKING" else "적재"
+            is_direct_start = bool(
+                action_key == BatchActionType.RELOCATE.value
+                and item.from_location is None
+                and to_loc is not None
+                and (to_loc.loc_name or "").startswith("S4-")
+            )
+
+            if is_direct_start:
+                action_name = "원자재 투입"
+            else:
+                action_name = {
+                    BatchActionType.RELOCATE.value: "재배치",
+                    BatchActionType.PICKING.value: "피킹",
+                    BatchActionType.INBOUND.value: "적재",
+                    BatchActionType.TEMP_MOVE.value: "임시이동",
+                    BatchActionType.RESTORE.value: "원상복구",
+                }.get(action_key, action_key)
+
+            if estimated_wip and estimated_wip.qr_id:
+                qr_code = await db.get(QrCodes, estimated_wip.qr_id)
+            elif is_direct_start:
+                qr_code = None
+            else:
+                qr_code = await db.get(QrCodes, wip.qr_id) if wip and wip.qr_id else None
+
+            nc_code = lc.nc_code if lc else None
+
+            manufacturer = (
+                estimated_wip.manufacturer if estimated_wip
+                else (wip.manufacturer if wip else "POSCO")
+            )
+            material = (
+                estimated_wip.material if estimated_wip
+                else (wip.material if wip else (lc.input_material if lc and lc.input_material else "알수없음"))
+            )
+            thickness = (
+                estimated_wip.thickness if estimated_wip
+                else (wip.thickness if wip else 0.0)
+            )
+            width = (
+                estimated_wip.width if estimated_wip
+                else (wip.width if wip else (lc.input_width if lc else 0.0))
+            )
+            length = (
+                estimated_wip.length if estimated_wip
+                else (wip.length if wip else (lc.input_length if lc else 0.0))
+            )
+            weight = (
+                estimated_wip.weight if estimated_wip
+                else (wip.weight if wip else 0.0)
+            )
+
+            if not is_direct_start:
+                total_move_num += 1
+            if item.batch_item_action == BatchActionType.PICKING.value:
+                total_wip_num += 1
 
             batch_items.append(BatchItemDetail(
                 batchItemId=item.id,
@@ -176,12 +225,12 @@ async def get_scenario_result(db: AsyncSession, scenario_id: int) -> list:
                 steelWipId=item.steel_wip_id or (wip.id if wip else 0),
                 qrCode=(qr_code.qr_code if qr_code and qr_code.qr_code else None),
                 ncCode=nc_code,
-                manufacturer=wip.manufacturer if wip else "알수없음",
-                material=wip.material if wip else "알수없음",
-                thickness=wip.thickness if wip else 0.0,
-                width=wip.width if wip else 0.0,
-                length=wip.length if wip else 0.0,
-                weight=wip.weight if wip else 0.0,
+                manufacturer=manufacturer,
+                material=material,
+                thickness=thickness,
+                width=width,
+                length=length,
+                weight=weight,
                 fromLocation=from_loc.loc_name if from_loc else None,
                 toLocation=to_loc.loc_name if to_loc else None,
                 expectedStartTime=item.expected_start_time,
@@ -225,6 +274,14 @@ async def delete_scenario_cascade(db: AsyncSession, scenario_id: int):
 
     cuttings = (await db.execute(select(LazerCutting.id).where(LazerCutting.scenario_id == scenario_id))).scalars().all()
     if cuttings:
+        raw_wip_ids = (
+            await db.execute(
+                select(LazerCutting.steel_wip_id).where(
+                    LazerCutting.id.in_(cuttings),
+                    LazerCutting.steel_wip_id.is_not(None),
+                )
+            )
+        ).scalars().all()
         wips = (await db.execute(select(EstimatedWips.qr_id).where(EstimatedWips.lazer_cutting_id.in_(cuttings)))).scalars().all()
         qr_ids = [q for q in wips if q]
         
@@ -238,6 +295,16 @@ async def delete_scenario_cascade(db: AsyncSession, scenario_id: int):
                 .values(qr_id=None)
             )
             await db.execute(delete(QrCodes).where(QrCodes.id.in_(qr_ids)))
+
+        raw_wip_ids = [wip_id for wip_id in raw_wip_ids if wip_id]
+        if raw_wip_ids:
+            await db.execute(
+                delete(SteelWip).where(
+                    SteelWip.id.in_(raw_wip_ids),
+                    SteelWip.status == WipStatus.RAW_MATERIAL.value,
+                    SteelWip.qr_id.is_(None),
+                )
+            )
         
         await db.execute(delete(LazerCutting).where(LazerCutting.scenario_id == scenario_id))
 
@@ -353,9 +420,10 @@ async def send_scenario_to_field(db: AsyncSession, scenario_id: int):
     if not scenario:
         raise ValueError("전송할 시나리오를 찾을 수 없습니다.")
         
-    # status=None 은 이전 버전 생성 시나리오 호환 허용 (신규는 항상 DRAFT로 생성됨)
-    if scenario.status not in ("DRAFT", None):
-        raise ValueError("대기(DRAFT) 상태인 시나리오만 전송할 수 있습니다.")
+    # 현재 서비스 흐름에서는 LANTEK import 이후 시나리오가 LANTEK_IMPORTED 상태가 된다.
+    # 따라서 발행 가능 상태는 DRAFT뿐 아니라 LANTEK_IMPORTED와 legacy None도 포함해야 한다.
+    if scenario.status not in ("DRAFT", "LANTEK_IMPORTED", None):
+        raise ValueError("대기(DRAFT/LANTEK_IMPORTED) 상태인 시나리오만 전송할 수 있습니다.")
 
     target_title = scenario.title
     
@@ -406,9 +474,24 @@ async def send_scenario_to_field(db: AsyncSession, scenario_id: int):
             item.status = BatchItemStatus.PENDING.value
             db.add(item)
             
-            # 연관된 SteelWip 상태 변경(RESERVATED)은 PICKING 대상 자재에만 적용해야 함
-            if item.batch_item_action == BatchActionType.PICKING.value and item.steel_wip_id:
-                wip_ids_for_reservation.append(item.steel_wip_id)
+            # 발행 시 실제 입력 자재는 점유 처리한다.
+            # - 일반 재공품 피킹(PICKING)
+            # - 원자재 direct start(RELOCATE + from 없음 + S4 투입)
+            is_direct_start = False
+            if item.batch_item_action == BatchActionType.RELOCATE.value and item.to_location:
+                to_loc = await db.get(Locations, item.to_location)
+                is_direct_start = bool(
+                    item.from_location is None
+                    and to_loc is not None
+                    and (to_loc.loc_name or "").startswith("S4-")
+                )
+
+            if item.steel_wip_id and (
+                item.batch_item_action == BatchActionType.PICKING.value or is_direct_start
+            ):
+                wip = await db.get(SteelWip, item.steel_wip_id)
+                if wip and wip.status != WipStatus.RAW_MATERIAL.value:
+                    wip_ids_for_reservation.append(item.steel_wip_id)
                 
         # 6. 연결된 원본 SteelWip 상태 RESERVATED로 예약 변경 (PICKING 대상만)
         if wip_ids_for_reservation:
