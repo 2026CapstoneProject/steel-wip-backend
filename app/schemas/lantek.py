@@ -3,30 +3,36 @@ from pydantic import BaseModel, Field
 from typing import List, Optional
 from datetime import date
 
+
 class LantekInput(BaseModel):
     manufacturer: str
     material: str
     thickness: float
     width: float
-    height: float  # 프론트엔드 명세의 height는 DB의 length와 매핑됩니다.
+    height: float  # DB의 length와 매핑
+    materialType: str  # "원자재" | "재공품"
+
 
 class LantekEstimatedWip(BaseModel):
     id: int
-    plannedWipId: Optional[int] = None
+    qrCode: Optional[str] = None       # PDF의 QR코드 컬럼값
     jobName: Optional[str] = None
     thickness: float
     width: float
     height: float
-    weight: Optional[float] = None   # estimated_wips.weight (절단 후 무게 kg)
+    weight: Optional[float] = None
     memo: Optional[str] = None
+
 
 class LantekCutting(BaseModel):
     id: int
     jobName: Optional[str] = None
+    ncCode: Optional[str] = None       # CNC 프로그램 번호
     plannedSourceWipId: Optional[int] = None
     estimatedCuttingTime: str
     input: LantekInput
     estimatedWips: List[LantekEstimatedWip]
+
 
 class LantekScenarioData(BaseModel):
     projectId: int
@@ -38,6 +44,7 @@ class LantekScenarioData(BaseModel):
     lazerName: str
     emergencyOrNot: bool
     lazerCutting: List[LantekCutting]
+
 
 class LantekDeleteRequest(BaseModel):
     scenario_id: int

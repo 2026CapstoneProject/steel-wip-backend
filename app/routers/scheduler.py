@@ -7,7 +7,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.schemas import BaseResponse
-from app.services.demo_solver_service import materialize_demo_solver_result
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -17,29 +16,40 @@ class SchedulerRequest(BaseModel):
 
 @router.post("/main", response_model=BaseResponse)
 async def call_main_solver(
-    request: SchedulerRequest, 
+    request: SchedulerRequest,
     db: AsyncSession = Depends(get_db)
 ):
     """
-    MAIN_SOLVER 호출
-    - 실제 solver는 시연 환경에서 시간이 오래 걸리므로,
-      사전 계산된 solver 결과를 DB에 반영한다.
+    CAASDy 솔버 실행 엔드포인트
+    - CAASDy 솔버 우선 실행
+    - 실패 시 rule-based 폴백 자동 전환
+    - 기존 Batch/BatchItems 삭제 후 재생성 (replace_existing=True)
     """
     try:
-        summary = await materialize_demo_solver_result(db, request.scenario_id)
-        await db.commit()
-        message = (
-            "사전 계산된 solver 결과를 반영했습니다. "
-            f"(Batch {summary['batchCount']}건, 작업 {summary['taskCount']}건, "
-            f"발생 재공품 {summary['generatedWipCount']}건)"
+        from app.services.lantek_service import (
+            ensure_scenario_execution_plan,
+            clear_scenario_execution_plan,
         )
+
+        # 기존 결과를 지우고 CAASDy 솔버 재실행
+        await clear_scenario_execution_plan(db, request.scenario_id)
+        ok = await ensure_scenario_execution_plan(
+            db, request.scenario_id, replace_existing=False
+        )
+        await db.commit()
+
+        if not ok:
+            raise ValueError("솔버 실행 결과가 없습니다. WIP 재고 및 LazerCutting 데이터를 확인하세요.")
+
+        message = "CAASDy 솔버 실행 완료"
+
+    except ValueError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         await db.rollback()
-        logger.exception(
-            "Demo solver materialization failed for scenario %s",
-            request.scenario_id,
-        )
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        logger.exception("솔버 실패 (scenario_id=%s): %s", request.scenario_id, exc)
+        raise HTTPException(status_code=500, detail=f"솔버 실행 중 오류: {exc}") from exc
 
     return BaseResponse(
         status=200,

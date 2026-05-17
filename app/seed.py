@@ -16,7 +16,7 @@ from sqlalchemy import delete
 
 from app.models import (
     Locations, QrCodes, Users, SteelWip, Projects, BatchItems,
-    EstimatedWips, LazerCutting, Batch, Scenarios
+    EstimatedWips, LazerCutting, Batch, Scenarios, RawMaterialSpecs
 )
 
 import bcrypt
@@ -59,6 +59,7 @@ async def seed_database(db: AsyncSession) -> None:
     await db.execute(delete(Batch))
     await db.execute(delete(Scenarios))
     await db.execute(delete(Projects))
+    await db.execute(delete(RawMaterialSpecs))
     await db.execute(delete(SteelWip))
     await db.execute(delete(Users))
     await db.execute(delete(QrCodes))
@@ -74,7 +75,7 @@ async def seed_database(db: AsyncSession) -> None:
             id=int(row['id']), 
             loc_name=row['loc_name'],
             # csv에 없는 기본값 설정
-            loc_can_stock=1 if 'LAZER' not in row['loc_name'] else 0,
+            loc_can_stock=row['loc_can_stock'],
             loc_stack_height=3 if 'LAZER' not in row['loc_name'] else 0
         ) for row in loc_data
     ]
@@ -126,6 +127,46 @@ async def seed_database(db: AsyncSession) -> None:
     if projects:
         db.add_all(projects)
         await db.flush()
+
+    # ─────────────────────────────────────────────────────────
+    # 5-1. Raw Material Specs - 허용 원자재 규격
+    # ─────────────────────────────────────────────────────────
+    raw_material_specs = [
+        RawMaterialSpecs(
+            material="SM355A",
+            thickness=20.0,
+            width=6096.0,
+            length=2438.0,
+            is_active=1,
+            description="운영 허용 원자재 규격",
+        ),
+        RawMaterialSpecs(
+            material="SM355A",
+            thickness=20.0,
+            width=2438.0,
+            length=6096.0,
+            is_active=1,
+            description="운영 허용 원자재 규격",
+        ),
+        RawMaterialSpecs(
+            material="SM355A",
+            thickness=20.0,
+            width=2438.0,
+            length=12192.0,
+            is_active=1,
+            description="운영 허용 원자재 규격",
+        ),
+        RawMaterialSpecs(
+            material="SM355A",
+            thickness=20.0,
+            width=12192.0,
+            length=2438.0,
+            is_active=1,
+            description="운영 허용 원자재 규격",
+        ),
+    ]
+    db.add_all(raw_material_specs)
+    await db.flush()
 
     # ─────────────────────────────────────────────────────────
     # 6. Steel WIPs - steel_wip.csv 참조

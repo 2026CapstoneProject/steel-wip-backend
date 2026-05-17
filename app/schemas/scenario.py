@@ -41,9 +41,11 @@ class ScenarioCreateRequest(BaseModel):
 
 
 class BatchItemDetail(BaseModel):
+    batchItemId: int 
     batchItemAction: str
     steelWipId: int
     qrCode: Optional[str] = None
+    ncCode: Optional[str] = None  
     manufacturer: str
     material: str
     thickness: float
@@ -53,6 +55,7 @@ class BatchItemDetail(BaseModel):
     fromLocation: Optional[str] = None
     toLocation: Optional[str] = None
     expectedStartTime: int
+    expectedRunningTime: Optional[int] = None  
 
 class ScenarioSolverSummary(BaseModel):
     status: str
@@ -90,6 +93,7 @@ class ScenarioResultData(BaseModel):
     scenarioTitle: str
     scenarioDue: date
     lazerName: str
+    status: Optional[str] = None
     totalCuttingTime: int
     totalWipNum: int
     totalCraneMove: int
@@ -126,10 +130,15 @@ class SentScenarioItem(BaseModel):
     scenarioTitle: str
     scenarioDue: date
     orderedAt: datetime
-    numInputWip: int  # 생산 계획으로 세운 투입 WIPs 개수 (PICKING 배치 아이템 수)
-
+    numInputWip: int
+    status: Optional[str]
+    
 class SentProjectHistory(BaseModel):
     projectId: int
     projectTitle: str
     projectDue: date
     scenarios: List[SentScenarioItem]
+
+class NcCodeUpdateRequest(BaseModel):
+    batchItemId: int
+    ncCode: str

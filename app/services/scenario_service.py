@@ -11,7 +11,7 @@ from sqlalchemy import func, update, delete
 from sqlalchemy.orm import selectinload
 from app.models import (
     Projects, Scenarios, LazerCutting, Batch, BatchItems, 
-    SteelWip, Locations, EstimatedWips, QrCodes
+    SteelWip, Locations, EstimatedWips, QrCodes,EstimatedWips, LazerCutting
 )
 from app.schemas.scenario import (
     ScenarioResultData,
@@ -26,13 +26,8 @@ from app.schemas.scenario import ScenarioHistoryItem, ProjectScenarioHistory, Se
 from app.schemas.batch_item import BatchItemStatus
 from app.schemas.wip import WipStatus
 from app.services.lantek_service import ensure_scenario_execution_plan
-from app.services.demo_solver_service import (
-    DEMO_SOLVER_SUMMARY,
-    DEMO_JOB_SCHEDULE,
-    DEMO_CRANE_SCHEDULE,
-    load_demo_production_plan_specs,
-    matches_demo_solver_result,
-)
+from app.models import SteelWipStatus
+
 
 async def get_or_create_scenario(db: AsyncSession, project_id: int, scenario_due: date) -> Scenarios:
     """
@@ -89,8 +84,8 @@ async def get_or_create_scenario(db: AsyncSession, project_id: int, scenario_due
         lazer_name="LAZER1",
         emergency_or_not=False,
         project_id=project_id,
-        creator_id=None,   # 인증 미구현: NULL 허용
-        assignee_id=None   # 인증 미구현: NULL 허용
+        creator_id=None,
+        assignee_id=None
     )
     
     db.add(new_scenario)
@@ -129,7 +124,6 @@ async def get_scenario_result(db: AsyncSession, scenario_id: int) -> list:
     total_move_num = 0
 
     items_result = []
-    production_plan_specs = load_demo_production_plan_specs()
     wip_detail_map: dict[int, dict] = {}
     if batch_ids:
         items_stmt = (
@@ -140,106 +134,116 @@ async def get_scenario_result(db: AsyncSession, scenario_id: int) -> list:
         items_result = (await db.execute(items_stmt)).scalars().all()
 
         for item in items_result:
-            total_move_num += 1
-            if item.batch_item_action == BatchActionType.PICKING.value:
-                total_wip_num += 1
+            action_key = (
+                item.batch_item_action.value
+                if hasattr(item.batch_item_action, "value")
+                else str(item.batch_item_action)
+            )
 
-            # WIP 정보
+            estimated_wip = None
             wip = await db.get(SteelWip, item.steel_wip_id) if item.steel_wip_id else None
-            production_plan_spec = production_plan_specs.get(item.steel_wip_id)
-            qr_code = await db.get(QrCodes, wip.qr_id) if wip and wip.qr_id else None
-            
+            lc = None
+            if item.steel_wip_id:
+                lc_stmt = select(LazerCutting).where(
+                    LazerCutting.batch_id == item.batch_id,
+                    LazerCutting.steel_wip_id == item.steel_wip_id,
+                )
+                lc = (await db.execute(lc_stmt)).scalars().first()
+            if lc is None and item.estimated_wip_id:
+                estimated_for_lc = await db.get(EstimatedWips, item.estimated_wip_id)
+                if estimated_for_lc and estimated_for_lc.lazer_cutting_id:
+                    lc = await db.get(LazerCutting, estimated_for_lc.lazer_cutting_id)
+            # ✅ INBOUND인 경우 estimated_wip_id를 사용해서 EstimatedWips 조회
+            if action_key == BatchActionType.INBOUND.value and item.estimated_wip_id:
+                estimated_wip = await db.get(EstimatedWips, item.estimated_wip_id)
+
             # Location 명칭 치환
             from_loc = await db.get(Locations, item.from_location) if item.from_location else None
             to_loc = await db.get(Locations, item.to_location) if item.to_location else None
 
             # Action 이름 한글 매핑
-            action_name = "재배치" if item.batch_item_action == "RELOCATE" else "피킹" if item.batch_item_action == "PICKING" else "적재"
+            is_direct_start = bool(
+                action_key == BatchActionType.RELOCATE.value
+                and item.from_location is None
+                and to_loc is not None
+                and (to_loc.loc_name or "").startswith("S4-")
+            )
+
+            if is_direct_start:
+                action_name = "원자재 투입"
+            else:
+                action_name = {
+                    BatchActionType.RELOCATE.value: "재배치",
+                    BatchActionType.PICKING.value: "피킹",
+                    BatchActionType.INBOUND.value: "적재",
+                    BatchActionType.TEMP_MOVE.value: "임시이동",
+                    BatchActionType.RESTORE.value: "원상복구",
+                }.get(action_key, action_key)
+
+            if estimated_wip and estimated_wip.qr_id:
+                qr_code = await db.get(QrCodes, estimated_wip.qr_id)
+            elif is_direct_start:
+                qr_code = None
+            else:
+                qr_code = await db.get(QrCodes, wip.qr_id) if wip and wip.qr_id else None
+
+            nc_code = lc.nc_code if lc else None
+
+            manufacturer = (
+                estimated_wip.manufacturer if estimated_wip
+                else (wip.manufacturer if wip else "POSCO")
+            )
+            material = (
+                estimated_wip.material if estimated_wip
+                else (wip.material if wip else (lc.input_material if lc and lc.input_material else "알수없음"))
+            )
+            thickness = (
+                estimated_wip.thickness if estimated_wip
+                else (wip.thickness if wip else 0.0)
+            )
+            width = (
+                estimated_wip.width if estimated_wip
+                else (wip.width if wip else (lc.input_width if lc else 0.0))
+            )
+            length = (
+                estimated_wip.length if estimated_wip
+                else (wip.length if wip else (lc.input_length if lc else 0.0))
+            )
+            weight = (
+                estimated_wip.weight if estimated_wip
+                else (wip.weight if wip else 0.0)
+            )
+
+            if not is_direct_start:
+                total_move_num += 1
+            if item.batch_item_action == BatchActionType.PICKING.value:
+                total_wip_num += 1
 
             batch_items.append(BatchItemDetail(
+                batchItemId=item.id,
                 batchItemAction=action_name,
                 steelWipId=item.steel_wip_id or (wip.id if wip else 0),
                 qrCode=(qr_code.qr_code if qr_code and qr_code.qr_code else None),
-                manufacturer=wip.manufacturer if wip else "알수없음",
-                material=(production_plan_spec.material if production_plan_spec else (wip.material if wip else "알수없음")),
-                thickness=(production_plan_spec.thickness if production_plan_spec else (wip.thickness if wip else 0.0)),
-                width=(production_plan_spec.width if production_plan_spec else (wip.width if wip else 0.0)),
-                length=(production_plan_spec.length if production_plan_spec else (wip.length if wip else 0.0)),
-                weight=wip.weight if wip else 0.0,
+                ncCode=nc_code,
+                manufacturer=manufacturer,
+                material=material,
+                thickness=thickness,
+                width=width,
+                length=length,
+                weight=weight,
                 fromLocation=from_loc.loc_name if from_loc else None,
                 toLocation=to_loc.loc_name if to_loc else None,
-                expectedStartTime=item.expected_start_time
+                expectedStartTime=item.expected_start_time,
+                expectedRunningTime=item.expected_running_time
             ))
 
             if item.steel_wip_id:
                 wip_detail_map[item.steel_wip_id] = {
                     "qrCode": qr_code.qr_code if qr_code and qr_code.qr_code else None,
-                    "thickness": production_plan_spec.thickness if production_plan_spec else (wip.thickness if wip else None),
-                    "width": production_plan_spec.width if production_plan_spec else (wip.width if wip else None),
-                    "length": production_plan_spec.length if production_plan_spec else (wip.length if wip else None),
+                    "thickness": wip.thickness if wip else None,
+                    "width": wip.width if wip else None,
+                    "length": wip.length if wip else None,
                 }
-
-    if matches_demo_solver_result(items_result, cuttings):
-        for steel_wip_id, detail in {
-            spec.steel_wip_id: spec for spec in production_plan_specs.values()
-        }.items():
-            existing = wip_detail_map.get(steel_wip_id, {})
-            if not existing.get("qrCode"):
-                wip = await db.get(SteelWip, steel_wip_id)
-                qr_code = await db.get(QrCodes, wip.qr_id) if wip and wip.qr_id else None
-                existing["qrCode"] = qr_code.qr_code if qr_code and qr_code.qr_code else None
-            existing["thickness"] = detail.thickness
-            existing["width"] = detail.width
-            existing["length"] = detail.length
-            wip_detail_map[steel_wip_id] = existing
-
-    solver_summary = None
-    job_schedule: list[ScenarioJobScheduleItem] = []
-    crane_schedule: list[ScenarioCraneScheduleItem] = []
-    total_crane_move = total_move_num + total_wip_num
-
-    is_demo_solver_result = matches_demo_solver_result(items_result, cuttings)
-
-    if is_demo_solver_result:
-        solver_summary = ScenarioSolverSummary(
-            status=DEMO_SOLVER_SUMMARY["status"],
-            objective=DEMO_SOLVER_SUMMARY["objective"],
-            mipGap=DEMO_SOLVER_SUMMARY["mipGap"],
-            solutions=DEMO_SOLVER_SUMMARY["solutions"],
-            solveSeconds=DEMO_SOLVER_SUMMARY["solveSeconds"],
-            makespanMinutes=DEMO_SOLVER_SUMMARY["makespanMinutes"],
-        )
-        job_schedule = [
-            ScenarioJobScheduleItem(
-                jobName=job.job_name,
-                sequence=job.sequence,
-                startMinute=job.start_minute,
-                endMinute=job.end_minute,
-                pickWips=job.pick_wips,
-                outputWips=job.output_wips,
-            )
-            for job in DEMO_JOB_SCHEDULE
-        ]
-        crane_schedule = [
-            ScenarioCraneScheduleItem(
-                order=row.order,
-                action=row.action,
-                steelWipId=row.steel_wip_id,
-                qrCode=(wip_detail_map.get(row.steel_wip_id) or {}).get("qrCode"),
-                thickness=(wip_detail_map.get(row.steel_wip_id) or {}).get("thickness"),
-                width=(wip_detail_map.get(row.steel_wip_id) or {}).get("width"),
-                length=(wip_detail_map.get(row.steel_wip_id) or {}).get("length"),
-                fromLocation=row.from_location,
-                toLocation=row.to_location,
-                eventMinute=row.event_minute,
-                moveType=row.move_type,
-            )
-            for row in DEMO_CRANE_SCHEDULE
-        ]
-        total_wip_num = sum(len(job.output_wips) for job in DEMO_JOB_SCHEDULE)
-        total_crane_move = len(DEMO_CRANE_SCHEDULE)
-        total_move_num = DEMO_SOLVER_SUMMARY["objective"]
-        total_cutting_time = round(DEMO_SOLVER_SUMMARY["makespanMinutes"])
 
     result_data = ScenarioResultData(
         projectId=project.id,
@@ -247,19 +251,19 @@ async def get_scenario_result(db: AsyncSession, scenario_id: int) -> list:
         scenarioId=scenario.id,
         scenarioTitle=scenario.title,
         scenarioDue=scenario.scenario_due,
-        lazerName=(scenario.lazer_name.value if hasattr(scenario.lazer_name, 'value') else (scenario.lazer_name or "LAZER1")),  # SQLite str / MySQL Enum 호환
+        lazerName=(scenario.lazer_name.value if hasattr(scenario.lazer_name, 'value') else (scenario.lazer_name or "LAZER1")),
+        status=(scenario.status.value if hasattr(scenario.status, 'value') else (scenario.status or "")),
         totalCuttingTime=total_cutting_time,
         totalWipNum=total_wip_num,
-        totalCraneMove=total_crane_move,
+        totalCraneMove=total_move_num,
         totalMoveNum=total_move_num,
         batchItems=batch_items,
-        solverSummary=solver_summary,
-        jobSchedule=job_schedule,
-        craneSchedule=crane_schedule,
+        solverSummary=None,
+        jobSchedule=[],
+        craneSchedule=[],
     )
     
     return [result_data]
-
 
 
 async def delete_scenario_cascade(db: AsyncSession, scenario_id: int):
@@ -268,26 +272,49 @@ async def delete_scenario_cascade(db: AsyncSession, scenario_id: int):
     if not scenario:
         raise ValueError("시나리오를 찾을 수 없습니다.")
 
-    # 1. LazerCutting, EstimatedWips, QrCodes 삭제
     cuttings = (await db.execute(select(LazerCutting.id).where(LazerCutting.scenario_id == scenario_id))).scalars().all()
     if cuttings:
+        raw_wip_ids = (
+            await db.execute(
+                select(LazerCutting.steel_wip_id).where(
+                    LazerCutting.id.in_(cuttings),
+                    LazerCutting.steel_wip_id.is_not(None),
+                )
+            )
+        ).scalars().all()
         wips = (await db.execute(select(EstimatedWips.qr_id).where(EstimatedWips.lazer_cutting_id.in_(cuttings)))).scalars().all()
         qr_ids = [q for q in wips if q]
         
         await db.execute(delete(EstimatedWips).where(EstimatedWips.lazer_cutting_id.in_(cuttings)))
+        
         if qr_ids:
+            # ✅ [추가] QrCodes 삭제 전, steel_wip의 qr_id 참조를 먼저 NULL로 해제
+            await db.execute(
+                update(SteelWip)
+                .where(SteelWip.qr_id.in_(qr_ids))
+                .values(qr_id=None)
+            )
             await db.execute(delete(QrCodes).where(QrCodes.id.in_(qr_ids)))
+
+        raw_wip_ids = [wip_id for wip_id in raw_wip_ids if wip_id]
+        if raw_wip_ids:
+            await db.execute(
+                delete(SteelWip).where(
+                    SteelWip.id.in_(raw_wip_ids),
+                    SteelWip.status == WipStatus.RAW_MATERIAL.value,
+                    SteelWip.qr_id.is_(None),
+                )
+            )
+        
         await db.execute(delete(LazerCutting).where(LazerCutting.scenario_id == scenario_id))
 
-    # 2. Batch, BatchItems 삭제
     batches = (await db.execute(select(Batch.id).where(Batch.scenario_id == scenario_id))).scalars().all()
     if batches:
         await db.execute(delete(BatchItems).where(BatchItems.batch_id.in_(batches)))
         await db.execute(delete(Batch).where(Batch.scenario_id == scenario_id))
 
-    # 3. 최상위 시나리오 삭제
     await db.delete(scenario)
-    await db.commit()
+    # ✅ commit을 여기서 하지 않음 (호출한 쪽에서 한 번만 commit)
 
 
 async def get_scenario_history(
@@ -303,7 +330,6 @@ async def get_scenario_history(
 ) -> list:
     """GET: 시나리오 생성 이력 다중 필터링 및 통계 조회 (DRAFT 상태만)"""
     
-    # 1. 기본 조인 쿼리 (Scenarios + Projects)
     stmt = (
         select(Scenarios, Projects)
         .join(Projects, Scenarios.project_id == Projects.id)
@@ -346,7 +372,6 @@ async def get_scenario_history(
                 "scenario": []
             }
             
-        # [통계 1] 총 예상 커팅 시간
         cut_stmt = select(func.sum(LazerCutting.estimated_cutting_time)).where(LazerCutting.scenario_id == scenario.id)
         total_minute = (await db.execute(cut_stmt)).scalar() or 0
         
@@ -365,10 +390,10 @@ async def get_scenario_history(
             id=scenario.id,
             title=scenario.title,
             due=scenario.scenario_due,
-            lazerName=(scenario.lazer_name.value if hasattr(scenario.lazer_name, 'value') else (scenario.lazer_name or "LAZER1")),  # SQLite str / MySQL Enum 호환
+            lazerName=(scenario.lazer_name.value if hasattr(scenario.lazer_name, 'value') else (scenario.lazer_name or "LAZER1")),
             selectedWips=selected_wips,
-            num_relocation=num_relocation, # Pydantic이 출력 시 "#relocation"으로 자동 치환
-            num_crane=num_crane,           # Pydantic이 출력 시 "#crane"으로 자동 치환
+            num_relocation=num_relocation,
+            num_crane=num_crane,
             totalMinute=total_minute
         )
         
@@ -391,14 +416,14 @@ async def send_scenario_to_field(db: AsyncSession, scenario_id: int):
     - PICKING 대상 SteelWip 상태 RESERVATED 변경
     - 동일한 title을 가졌지만 선택되지 않은 다른 시나리오들 삭제
     """
-    # 1. 대상 시나리오 조회 및 유효성 검사
     scenario = await db.get(Scenarios, scenario_id)
     if not scenario:
         raise ValueError("전송할 시나리오를 찾을 수 없습니다.")
         
-    # status=None 은 이전 버전 생성 시나리오 호환 허용 (신규는 항상 DRAFT로 생성됨)
-    if scenario.status not in ("DRAFT", None):
-        raise ValueError("대기(DRAFT) 상태인 시나리오만 전송할 수 있습니다.")
+    # 현재 서비스 흐름에서는 LANTEK import 이후 시나리오가 LANTEK_IMPORTED 상태가 된다.
+    # 따라서 발행 가능 상태는 DRAFT뿐 아니라 LANTEK_IMPORTED와 legacy None도 포함해야 한다.
+    if scenario.status not in ("DRAFT", "LANTEK_IMPORTED", None):
+        raise ValueError("대기(DRAFT/LANTEK_IMPORTED) 상태인 시나리오만 전송할 수 있습니다.")
 
     target_title = scenario.title
     
@@ -410,13 +435,11 @@ async def send_scenario_to_field(db: AsyncSession, scenario_id: int):
     if scenario.emergency_or_not:
         # 긴급 발주일 경우: 본인은 0순위
         scenario.scenario_order = 0
-        
-        # 기존에 진행 중인(ORDERED, IN_PROGRESS) 시나리오들의 순서를 +1씩 밀어냄
         push_stmt = (
             update(Scenarios)
             .where(
                 Scenarios.status.in_(["ORDERED", "IN_PROGRESS"]),
-                Scenarios.id != scenario_id # 자기 자신은 제외
+                Scenarios.id != scenario_id
             )
             .values(scenario_order=Scenarios.scenario_order + 1)
         )
@@ -440,7 +463,6 @@ async def send_scenario_to_field(db: AsyncSession, scenario_id: int):
     batches = (await db.execute(batch_stmt)).scalars().all()
     
     if batches:
-        # 5. BatchItems의 모든 작업(재배치, 피킹, 적재)을 가져옴
         items_stmt = select(BatchItems).where(
             BatchItems.batch_id.in_(batches)
         )
@@ -452,9 +474,24 @@ async def send_scenario_to_field(db: AsyncSession, scenario_id: int):
             item.status = BatchItemStatus.PENDING.value
             db.add(item)
             
-            # 연관된 SteelWip 상태 변경(RESERVATED)은 PICKING 대상 자재에만 적용해야 함
-            if item.batch_item_action == BatchActionType.PICKING.value and item.steel_wip_id:
-                wip_ids_for_reservation.append(item.steel_wip_id)
+            # 발행 시 실제 입력 자재는 점유 처리한다.
+            # - 일반 재공품 피킹(PICKING)
+            # - 원자재 direct start(RELOCATE + from 없음 + S4 투입)
+            is_direct_start = False
+            if item.batch_item_action == BatchActionType.RELOCATE.value and item.to_location:
+                to_loc = await db.get(Locations, item.to_location)
+                is_direct_start = bool(
+                    item.from_location is None
+                    and to_loc is not None
+                    and (to_loc.loc_name or "").startswith("S4-")
+                )
+
+            if item.steel_wip_id and (
+                item.batch_item_action == BatchActionType.PICKING.value or is_direct_start
+            ):
+                wip = await db.get(SteelWip, item.steel_wip_id)
+                if wip and wip.status != WipStatus.RAW_MATERIAL.value:
+                    wip_ids_for_reservation.append(item.steel_wip_id)
                 
         # 6. 연결된 원본 SteelWip 상태 RESERVATED로 예약 변경 (PICKING 대상만)
         if wip_ids_for_reservation:
@@ -464,7 +501,6 @@ async def send_scenario_to_field(db: AsyncSession, scenario_id: int):
                 .values(status=WipStatus.RESERVATED.value)
             )
             
-    # 7. 동일한 title을 가졌지만 선택받지 못한 다른 비교 시나리오들 조회 및 연쇄 삭제
     other_scenarios_stmt = select(Scenarios.id).where(
         Scenarios.title == target_title,
         Scenarios.id != scenario_id,
@@ -480,7 +516,7 @@ async def send_scenario_to_field(db: AsyncSession, scenario_id: int):
         
     # 8. 최종 반영
     await db.commit()
-# app/services/scenario_service.py 하단에 추가
+
 
 async def get_sent_scenario_history(
     db: AsyncSession,
@@ -499,7 +535,7 @@ async def get_sent_scenario_history(
     stmt = (
         select(Scenarios, Projects)
         .join(Projects, Scenarios.project_id == Projects.id)
-        .where(Scenarios.status != "DRAFT")
+        .where(Scenarios.status.in_(["ORDERED", "IN_PROGRESS", "COMPLETED"]))
     )
     
     # 2. 동적 필터링 적용
@@ -553,11 +589,48 @@ async def get_sent_scenario_history(
             scenarioId=scenario.id,
             scenarioTitle=scenario.title,
             scenarioDue=scenario.scenario_due,
-            orderedAt=scenario.ordered_at or scenario.created_at, # 예외 방지용 fallback
-            numInputWip=num_input_wip
+            orderedAt=scenario.ordered_at or scenario.created_at,
+            numInputWip=num_input_wip,
+            status=(scenario.status.value if hasattr(scenario.status, "value") else (scenario.status or "-"))
         )
         
         projects_map[project.id]["scenarios"].append(scenario_item)
 
     # 4. Dictionary를 List 객체 형태로 반환
     return [SentProjectHistory(**data) for data in projects_map.values()]
+
+
+
+
+async def update_nc_code(db: AsyncSession, scenario_id: int, batch_item_id: int, nc_code: str):
+    """PATCH: 특정 BatchItem에 연결된 LazerCutting의 NC코드 수정"""
+
+    # 1. BatchItem 존재 + 해당 scenario 소속 확인
+    item_stmt = (
+        select(BatchItems)
+        .join(Batch, BatchItems.batch_id == Batch.id)
+        .where(
+            BatchItems.id == batch_item_id,
+            Batch.scenario_id == scenario_id,
+        )
+    )
+    item = (await db.execute(item_stmt)).scalars().first()
+    if not item:
+        raise ValueError("해당 시나리오에서 BatchItem을 찾을 수 없습니다.")
+
+    # 2. steel_wip_id + batch_id로 LazerCutting 조회
+    lc_stmt = select(LazerCutting).where(
+        LazerCutting.steel_wip_id == item.steel_wip_id,
+        LazerCutting.batch_id == item.batch_id,
+    )
+    lc = (await db.execute(lc_stmt)).scalars().first()
+    if not lc:
+        raise ValueError("해당 BatchItem에 연결된 LazerCutting을 찾을 수 없습니다.")
+
+    # 3. NC코드 업데이트
+    lc.nc_code = nc_code
+    db.add(lc)
+    await db.commit()
+    await db.refresh(lc)
+
+    return {"lazerCuttingId": lc.id, "ncCode": lc.nc_code}

@@ -1,5 +1,5 @@
 # app/routers/lantek.py
-from fastapi import APIRouter, Depends, UploadFile, File, Form
+from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List
 
@@ -8,11 +8,9 @@ from app.schemas import BaseResponse
 from app.schemas.lantek import LantekScenarioData, LantekDeleteRequest
 from app.services import lantek_service
 
-from fastapi import HTTPException
-
 router = APIRouter()
 
-# 1. 초기 화면 조회 (GET)
+
 @router.get("/get/{scenario_id}", response_model=BaseResponse[List[LantekScenarioData]])
 async def get_lantek_scenario(scenario_id: int, db: AsyncSession = Depends(get_db)):
     data = await lantek_service.get_lantek_data(db, scenario_id)
@@ -22,34 +20,35 @@ async def get_lantek_scenario(scenario_id: int, db: AsyncSession = Depends(get_d
         data=data
     )
 
+
 @router.post("/import", response_model=BaseResponse[List[LantekScenarioData]])
 async def import_lantek_pdf(
-    scenario_id: int = Form(..., description="데이터를 연결할 시나리오 ID"), 
-    file: UploadFile = File(...), 
+    scenario_id: int = Form(..., description="데이터를 연결할 시나리오 ID"),
+    files: List[UploadFile] = File(...),  # 단일 → 복수
     db: AsyncSession = Depends(get_db)
 ):
     try:
-        file_bytes = await file.read()
-        await lantek_service.create_dummy_lantek_data(
+        files_data = []
+        for f in files:
+            file_bytes = await f.read()
+            files_data.append({"bytes": file_bytes, "filename": f.filename})
+
+        await lantek_service.create_lantek_data_from_pdfs(
             db,
             scenario_id,
-            file_bytes=file_bytes,
-            filename=file.filename,
+            files_data=files_data,
         )
-        
-        # 처리 완료 후, 방금 생성된 시나리오 ID를 기준으로 데이터를 다시 조회하여 반환
+
         data = await lantek_service.get_lantek_data(db, scenario_id)
-        
         return BaseResponse(
             status=201,
             message="LANTEK 결과 처리에 성공했습니다.",
             data=data
         )
     except ValueError as e:
-        # IN_STOCK이 아니어서 던져진 에러를 잡아 400 뱉음
         raise HTTPException(status_code=400, detail=str(e))
 
-# 3. LANTEK 결과 초기화 (DELETE)
+
 @router.delete("/delete", response_model=BaseResponse)
 async def delete_lantek(request: LantekDeleteRequest, db: AsyncSession = Depends(get_db)):
     await lantek_service.delete_lantek_data(db, request.scenario_id)
