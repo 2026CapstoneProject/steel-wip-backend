@@ -260,7 +260,8 @@ async def test_get_lantek_cutting_time_format(client: AsyncClient, db_session: A
 async def test_import_lantek_success(client: AsyncClient, db_session: AsyncSession):
     """
     IN_STOCK WIP이 있으면 import 성공 —
-    LazerCutting 12개 생성 + 시나리오 status → DRAFT
+    LazerCutting 12개 생성 + 시나리오 status → LANTEK_IMPORTED
+    import 단계에서는 solver / batch 생성이 일어나지 않는다.
     """
     project = await make_project(db_session)
     scenario = await make_scenario(db_session, project.id, status=None)
@@ -279,9 +280,9 @@ async def test_import_lantek_success(client: AsyncClient, db_session: AsyncSessi
     body = response.json()
     assert body["status"] == 201
 
-    # 시나리오 상태 DRAFT 확인
+    # 시나리오 상태 LANTEK_IMPORTED 확인
     await db_session.refresh(scenario)
-    assert scenario.status == "DRAFT"
+    assert scenario.status == "LANTEK_IMPORTED"
 
     # LazerCutting 12개 생성 확인
     lc_count_result = await db_session.execute(
@@ -298,8 +299,8 @@ async def test_import_lantek_success(client: AsyncClient, db_session: AsyncSessi
             select(BatchItems).join(Batch, BatchItems.batch_id == Batch.id).where(Batch.scenario_id == scenario.id)
         )
     ).scalars().all()
-    assert len(batch_list) == 3
-    assert len(batch_item_list) > 0
+    assert len(batch_list) == 0
+    assert len(batch_item_list) == 0
 
 
 @pytest.mark.asyncio
@@ -544,8 +545,8 @@ async def test_import_lantek_populates_scenario_result_batch_items(
     monkeypatch, client: AsyncClient, db_session: AsyncSession
 ):
     """
-    import 직후 /api/scenario/{id}에서도 batchItems가 보여야 한다.
-    solver를 따로 돌리지 않아도 office result/history 화면이 비지 않도록 보장한다.
+    import 직후에는 /api/scenario/{id}에 batchItems가 없어야 한다.
+    실행 계획은 별도 solver 실행 또는 현장 전송 시점에 생성된다.
     """
     project = await make_project(db_session)
     scenario = await make_scenario(db_session, project.id, status=None)
@@ -573,7 +574,7 @@ async def test_import_lantek_populates_scenario_result_batch_items(
     scenario_response = await client.get(f"/api/scenario/{scenario.id}")
     assert scenario_response.status_code == 200
     batch_items = scenario_response.json()["data"][0]["batchItems"]
-    assert len(batch_items) >= 2
+    assert batch_items == []
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -663,7 +664,7 @@ async def test_delete_lantek_can_reimport(client: AsyncClient, db_session: Async
 
     assert response.status_code == 200
     await db_session.refresh(scenario)
-    assert scenario.status == "DRAFT"
+    assert scenario.status == "LANTEK_IMPORTED"
 
 
 # ══════════════════════════════════════════════════════════════════════
