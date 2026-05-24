@@ -461,14 +461,6 @@ async def create_lantek_data_from_pdfs(
             "올바른 LANTEK CUTTING PLAN PDF인지 확인해주세요."
         )
     await _create_parsed_lantek_data(db, scenario, all_layouts)
-
-    plan_ready = await ensure_scenario_execution_plan(
-        db,
-        scenario_id,
-        replace_existing=True,
-    )
-    if not plan_ready:
-        raise ValueError("CAASDy 실행 계획 생성에 실패했습니다.")
     await db.commit()
 
 async def get_lantek_data(db: AsyncSession, scenario_id: int) -> list:
