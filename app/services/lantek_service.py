@@ -412,7 +412,11 @@ async def _create_parsed_lantek_data(
         cutting = LazerCutting(
             scenario_id=scenario.id,
             status="PENDING",
-            priority="LOW",
+            priority=(
+                scenario.process_priority.value
+                if hasattr(scenario.process_priority, "value")
+                else (scenario.process_priority or "LOW")
+            ),
             estimated_cutting_time=layout.estimated_minutes,
             steel_wip_id=target_wip.id,
             nc_code=layout.nc_code,

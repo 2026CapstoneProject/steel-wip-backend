@@ -168,6 +168,11 @@ class Scenarios(Base):
     ordered_at: Mapped[Optional[datetime.datetime]] = mapped_column(TIMESTAMP)
     completed_at: Mapped[Optional[datetime.datetime]] = mapped_column(TIMESTAMP)
     lazer_name: Mapped[Optional[ScenariosLazerName]] = mapped_column(Enum(ScenariosLazerName, values_callable=lambda cls: [member.value for member in cls]))
+    process_priority: Mapped[Optional[LazerCuttingPriority]] = mapped_column(
+        Enum(LazerCuttingPriority, values_callable=lambda cls: [member.value for member in cls]),
+        nullable=True,
+        server_default=text("'LOW'"),
+    )
     project_id: Mapped[Optional[int]] = mapped_column(Integer)
     creator_id: Mapped[Optional[int]] = mapped_column(Integer)
     assignee_id: Mapped[Optional[int]] = mapped_column(Integer)

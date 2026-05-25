@@ -137,7 +137,12 @@ async def test_create_scenario_success(client: AsyncClient, db_session: AsyncSes
     project = await make_project(db_session, title="포스코 건설(80톤)")
     await db_session.commit()
 
-    payload = {"project_id": project.id, "scenario_due": "2026-12-31"}
+    payload = {
+        "project_id": project.id,
+        "scenario_due": "2026-12-31",
+        "lazer_name": "LAZER2",
+        "process_priority": "HIGH",
+    }
     response = await client.post("/api/scenario/create", json=payload)
 
     assert response.status_code == 200
@@ -146,6 +151,8 @@ async def test_create_scenario_success(client: AsyncClient, db_session: AsyncSes
     data = body["data"]
     assert data["project_id"] == project.id
     assert data["status"] is None
+    assert data["lazer_name"] == "LAZER2"
+    assert data["process_priority"] == "HIGH"
     assert "포스코 건설(80톤)-1" in data["title"]
 
 
@@ -167,6 +174,35 @@ async def test_create_scenario_reuses_existing_none_status(
     assert response.status_code == 200
     data = response.json()["data"]
     assert data["id"] == existing.id  # 기존 시나리오 ID와 동일
+
+
+@pytest.mark.asyncio
+async def test_create_scenario_reuse_updates_lazer_and_priority(
+    client: AsyncClient, db_session: AsyncSession
+):
+    project = await make_project(db_session)
+    existing = await make_scenario(
+        db_session,
+        project.id,
+        status=None,
+        lazer_name="LAZER1",
+    )
+    existing.process_priority = "LOW"
+    await db_session.commit()
+
+    payload = {
+        "project_id": project.id,
+        "scenario_due": "2026-12-31",
+        "lazer_name": "LAZER3",
+        "process_priority": "MIDDLE",
+    }
+    response = await client.post("/api/scenario/create", json=payload)
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["id"] == existing.id
+    assert data["lazer_name"] == "LAZER3"
+    assert data["process_priority"] == "MIDDLE"
 
 
 @pytest.mark.asyncio

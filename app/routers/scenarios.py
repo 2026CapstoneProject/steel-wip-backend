@@ -23,7 +23,9 @@ async def create_scenario(
         scenario = await scenario_service.get_or_create_scenario(
             db=db, 
             project_id=request.project_id, 
-            scenario_due=request.scenario_due
+            scenario_due=request.scenario_due,
+            lazer_name=request.lazer_name,
+            process_priority=request.process_priority,
         )
         return BaseResponse(
             status=201,
