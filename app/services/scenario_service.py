@@ -724,6 +724,7 @@ async def send_scenario_to_field(db: AsyncSession, scenario_id: int):
 async def get_sent_scenario_history(
     db: AsyncSession,
     project_name: Optional[str] = None,
+    scenario_name: Optional[str] = None,
     proj_due_min: Optional[date] = None,
     proj_due_max: Optional[date] = None,
     scen_due_min: Optional[date] = None,
@@ -744,6 +745,9 @@ async def get_sent_scenario_history(
     # 2. 동적 필터링 적용
     if project_name:
         stmt = stmt.where(Projects.title.ilike(f"%{project_name}%"))
+
+    if scenario_name:
+        stmt = stmt.where(Scenarios.title.ilike(f"%{scenario_name}%"))
         
     if proj_due_min:
         stmt = stmt.where(Projects.project_due >= proj_due_min)
