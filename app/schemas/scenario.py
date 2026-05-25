@@ -79,6 +79,7 @@ class ScenarioCraneScheduleItem(BaseModel):
     batchId: Optional[int] = None
     batchItemOrder: Optional[int] = None
     action: str
+    actionLabel: Optional[str] = None
     steelWipId: int
     qrCode: Optional[str] = None
     ncCode: Optional[str] = None
@@ -96,9 +97,13 @@ class ScenarioCraneScheduleItem(BaseModel):
 class ScenarioResultData(BaseModel):
     projectId: int
     projectTitle: str
+    projectDue: Optional[date] = None
     scenarioId: int
     scenarioTitle: str
     scenarioDue: date
+    orderedAt: Optional[datetime] = None
+    numInputWip: int = 0
+    emergencyOrNot: bool = False
     lazerName: str
     status: Optional[str] = None
     totalCuttingTime: int

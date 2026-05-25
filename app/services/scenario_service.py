@@ -200,6 +200,7 @@ async def _build_solver_payload(
                 batchId=item.batch_id,
                 batchItemOrder=item.batch_item_order,
                 action=display_action,
+                actionLabel=_get_action_display_name(action_key, snapshot["is_direct_start"]),
                 steelWipId=steel_wip_id,
                 qrCode=(
                     snapshot["qr_code"].qr_code
@@ -427,13 +428,18 @@ async def get_scenario_result(db: AsyncSession, scenario_id: int) -> list:
     )
     result_total_cutting_time = makespan_minutes if solver_summary else total_cutting_time
     result_total_move_num = move_objective if solver_summary else total_move_num
+    ordered_at = scenario.ordered_at or scenario.created_at
 
     result_data = ScenarioResultData(
         projectId=project.id,
         projectTitle=project.title,
+        projectDue=project.project_due,
         scenarioId=scenario.id,
         scenarioTitle=scenario.title,
         scenarioDue=scenario.scenario_due,
+        orderedAt=ordered_at,
+        numInputWip=total_wip_num,
+        emergencyOrNot=bool(scenario.emergency_or_not),
         lazerName=(scenario.lazer_name.value if hasattr(scenario.lazer_name, 'value') else (scenario.lazer_name or "LAZER1")),
         status=(scenario.status.value if hasattr(scenario.status, 'value') else (scenario.status or "")),
         totalCuttingTime=result_total_cutting_time,

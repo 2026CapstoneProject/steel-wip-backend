@@ -118,6 +118,10 @@ async def test_scheduler_main_demo_result_is_visible_in_scenario_result(
     scenario_result = data[0]
     assert scenario_result["totalCuttingTime"] == 268
     assert scenario_result["totalWipNum"] == 2
+    assert scenario_result["projectDue"] == "2026-12-31"
+    assert scenario_result["orderedAt"] is not None
+    assert scenario_result["numInputWip"] == 2
+    assert scenario_result["emergencyOrNot"] is False
     assert scenario_result["totalMoveNum"] == 8
     assert scenario_result["solverSummary"]["status"] == "TIME_LIMIT"
     assert scenario_result["solverSummary"]["objective"] == 8
@@ -129,6 +133,7 @@ async def test_scheduler_main_demo_result_is_visible_in_scenario_result(
     assert scenario_result["jobSchedule"][1]["outputWips"] == [103]
     assert len(scenario_result["craneSchedule"]) == 12
     assert scenario_result["craneSchedule"][0]["action"] == "RELOCATE"
+    assert scenario_result["craneSchedule"][0]["actionLabel"] == "재배치"
     assert scenario_result["craneSchedule"][0]["batchItemId"] is not None
     assert scenario_result["craneSchedule"][0]["batchId"] is not None
     assert scenario_result["craneSchedule"][0]["batchItemOrder"] is not None
