@@ -16,6 +16,7 @@ class LantekInput(BaseModel):
 class LantekEstimatedWip(BaseModel):
     id: int
     qrCode: Optional[str] = None       # PDF의 QR코드 컬럼값
+    plannedWipId: Optional[int] = None
     jobName: Optional[str] = None
     thickness: float
     width: float

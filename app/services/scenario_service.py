@@ -191,9 +191,14 @@ async def _build_solver_payload(
             else action_key
         )
         steel_wip_id = _resolve_display_wip_id(item, snapshot)
+        expected_start_minute = float(item.expected_start_time or 0)
+        expected_duration_minutes = float(item.expected_running_time or 0)
         crane_schedule.append(
             ScenarioCraneScheduleItem(
                 order=order,
+                batchItemId=item.id,
+                batchId=item.batch_id,
+                batchItemOrder=item.batch_item_order,
                 action=display_action,
                 steelWipId=steel_wip_id,
                 qrCode=(
@@ -201,12 +206,20 @@ async def _build_solver_payload(
                     if snapshot["qr_code"] and snapshot["qr_code"].qr_code
                     else None
                 ),
+                ncCode=(
+                    snapshot["lazer_cutting"].nc_code
+                    if snapshot["lazer_cutting"] and snapshot["lazer_cutting"].nc_code
+                    else None
+                ),
                 thickness=snapshot["thickness"],
                 width=snapshot["width"],
                 length=snapshot["length"],
                 fromLocation=snapshot["from_loc"].loc_name if snapshot["from_loc"] else "-",
                 toLocation=snapshot["to_loc"].loc_name if snapshot["to_loc"] else "-",
-                eventMinute=float(item.expected_start_time or 0),
+                eventMinute=expected_start_minute,
+                expectedStartMinute=expected_start_minute,
+                expectedDurationMinutes=expected_duration_minutes,
+                expectedEndMinute=expected_start_minute + expected_duration_minutes,
                 moveType=(
                     "DIRECT_START" if snapshot["is_direct_start"]
                     else ("MOVE" if _is_crane_move_action(action_key) else action_key)

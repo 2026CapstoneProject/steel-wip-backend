@@ -9,6 +9,7 @@
 import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
 from app.models import Users
 
@@ -52,6 +53,13 @@ async def test_create_user_success(client: AsyncClient, db_session: AsyncSession
     assert body["data"]["username"] == "김현장"
     assert body["data"]["role"] == "FIELD"
     assert body["data"]["department"] == "생산부"
+
+    created_user = (
+        await db_session.execute(select(Users).where(Users.username == "김현장"))
+    ).scalars().first()
+    assert created_user is not None
+    assert created_user.created_at is not None
+    assert created_user.password is not None
 
 
 @pytest.mark.asyncio

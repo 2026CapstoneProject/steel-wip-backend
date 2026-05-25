@@ -5,10 +5,20 @@ from typing import List, Optional
 
 from app.models import Users
 from app.schemas.user import UserCreate, UserUpdate
+from app.core.clock import utc_now_naive
+from app.core.security import generate_unusable_password_hash, hash_password
 
 async def create_user(db: AsyncSession, user_data: UserCreate) -> Users:
     """새로운 사용자 생성"""
-    db_user = Users(**user_data.model_dump())
+    payload = user_data.model_dump()
+    raw_password = payload.pop("password", None)
+    payload["password"] = (
+        hash_password(raw_password)
+        if raw_password
+        else generate_unusable_password_hash()
+    )
+    payload["created_at"] = utc_now_naive()
+    db_user = Users(**payload)
     db.add(db_user)
     await db.commit()
     await db.refresh(db_user)

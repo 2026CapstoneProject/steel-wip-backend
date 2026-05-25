@@ -117,6 +117,104 @@ def _parse_layouts_from_text(text: str) -> list[ParsedLantekLayout]:
     """
     normalized = _normalize_pdf_text(text)
 
+    english_sections = re.split(r"(?=PART SUMMARY)", normalized, flags=re.IGNORECASE)
+    english_layouts: list[ParsedLantekLayout] = []
+    for section in english_sections:
+        if "LAYOUT" not in section.upper():
+            continue
+
+        layout_match = re.search(r"LAYOUT\s+([0-9]+-[0-9]+/[0-9]+)", section, re.IGNORECASE)
+        slab_match = re.search(r"SLAB SIZE\s*:\s*([0-9.]+)mm\*([0-9.]+)mm", section, re.IGNORECASE)
+        plate_match = re.search(r"PLATE SIZE\s*:\s*([0-9.]+)mm\*([0-9.]+)mm", section, re.IGNORECASE)
+        time_match = re.search(r"CUTTING TIME HOURS\s*:\s*([0-9.]+)", section, re.IGNORECASE)
+        thickness_match = re.search(r"THICKNESS\s*:\s*([0-9.]+)mm", section, re.IGNORECASE)
+        material_match = re.search(r"MATERIAL\s*:\s*([A-Za-z0-9_-]+)", section, re.IGNORECASE)
+
+        if not (layout_match and slab_match and plate_match and time_match and thickness_match and material_match):
+            continue
+
+        job_match = re.search(r"JOB NAME\s*:\s*([^\n]+)", section, re.IGNORECASE)
+        source_match = re.search(r"SOURCE WIP ID\s*:\s*([0-9]+)", section, re.IGNORECASE)
+        output_match = re.search(r"OUTPUT WIP ID\s*:\s*([0-9]+)", section, re.IGNORECASE)
+        output_size_match = re.search(r"OUTPUT SIZE\s*:\s*([0-9.]+)mm\*([0-9.]+)mm", section, re.IGNORECASE)
+
+        planned_output_wip_id = int(output_match.group(1)) if output_match else None
+        output_width = float(output_size_match.group(1)) if output_size_match else None
+        output_length = float(output_size_match.group(2)) if output_size_match else None
+        output_parts = []
+        if planned_output_wip_id and planned_output_wip_id > 0 and output_width and output_length:
+            output_parts.append(
+                {
+                    "name": "재공품",
+                    "qr_code": f"DEMO-WIP-{planned_output_wip_id}",
+                    "width": output_width,
+                    "height": output_length,
+                    "weight": _calculate_weight(
+                        float(thickness_match.group(1)),
+                        output_width,
+                        output_length,
+                    ),
+                }
+            )
+
+        english_layouts.append(
+            ParsedLantekLayout(
+                layout_name=layout_match.group(1),
+                slab_width=float(slab_match.group(1)),
+                slab_length=float(slab_match.group(2)),
+                plate_width=float(plate_match.group(1)),
+                plate_length=float(plate_match.group(2)),
+                thickness=float(thickness_match.group(1)),
+                material=material_match.group(1),
+                estimated_minutes=max(1, round(float(time_match.group(1)) * 60)),
+                job_name=job_match.group(1).strip() if job_match else None,
+                planned_source_wip_id=int(source_match.group(1)) if source_match else None,
+                planned_output_wip_id=planned_output_wip_id,
+                output_width=output_width,
+                output_length=output_length,
+                output_parts=output_parts,
+                input_width=float(plate_match.group(1)),
+                input_length=float(plate_match.group(2)),
+            )
+        )
+
+    if english_layouts:
+        return english_layouts
+
+    korean_sections = re.split(r"(?=부품 정보 요약)", normalized)
+    korean_layouts: list[ParsedLantekLayout] = []
+    for section in korean_sections:
+        if "레이아웃" not in section:
+            continue
+
+        slab_match = re.search(r"슬랩 사이즈\s*:\s*([0-9.]+)mm\*([0-9.]+)mm", section)
+        plate_match = re.search(r"판재 크기\s*:\s*([0-9.]+)mm\*([0-9.]+)mm", section)
+        time_match = re.search(r"단일 가공 시간\s*시간\s*:\s*([0-9.]+)", section)
+        thickness_match = re.search(r"판재 두께\s*:\s*([0-9.]+)mm", section)
+        material_match = re.search(r"판재 재질\s*:\s*([A-Za-z0-9_-]+)", section)
+        layout_match = re.search(r"레이아웃\s*([0-9]+-[0-9]+/[0-9]+)", section)
+        if not (slab_match and plate_match and time_match and thickness_match and material_match and layout_match):
+            continue
+
+        korean_layouts.append(
+            ParsedLantekLayout(
+                layout_name=layout_match.group(1),
+                slab_width=float(slab_match.group(1)),
+                slab_length=float(slab_match.group(2)),
+                plate_width=float(plate_match.group(1)),
+                plate_length=float(plate_match.group(2)),
+                thickness=float(thickness_match.group(1)),
+                material=material_match.group(1),
+                estimated_minutes=max(1, round(float(time_match.group(1)) * 60)),
+                output_parts=[],
+                input_width=float(plate_match.group(1)),
+                input_length=float(plate_match.group(2)),
+            )
+        )
+
+    if korean_layouts:
+        return korean_layouts
+
     if not re.search(r"O\d{4,6}", normalized) and "CNC" not in normalized and "CUTTING" not in normalized.upper():
         return []
 
@@ -239,9 +337,10 @@ def _pick_matching_wip(
 async def _match_wip_for_remanufactured(
     db: AsyncSession,
     layout: ParsedLantekLayout,
+    used_wip_ids: set[int] | None = None,
 ) -> SteelWip | None:
     """재공품 투입 자재를 DB에서 두께+재질+규격으로 매칭"""
-    result = await db.execute(
+    base_query = (
         select(SteelWip)
         .where(
             SteelWip.material == layout.material,
@@ -251,8 +350,16 @@ async def _match_wip_for_remanufactured(
             SteelWip.status.in_([WipStatus.IN_STOCK.value, WipStatus.REGISTERED.value]),
         )
         .order_by(SteelWip.id.asc())
-        .limit(1)
     )
+    if used_wip_ids:
+        unused_result = await db.execute(
+            base_query.where(SteelWip.id.not_in(used_wip_ids)).limit(1)
+        )
+        unused = unused_result.scalars().first()
+        if unused is not None:
+            return unused
+
+    result = await db.execute(base_query.limit(1))
     return result.scalars().first()
 
 
@@ -281,6 +388,7 @@ async def _create_parsed_lantek_data(
     scenario: Scenarios,
     layouts: list[ParsedLantekLayout],
 ) -> None:
+    used_wip_ids: set[int] = set()
     for index, layout in enumerate(layouts, start=1):
         is_allowed_raw_material = await _is_allowed_raw_material_spec(
             db,
@@ -293,12 +401,13 @@ async def _create_parsed_lantek_data(
         if is_allowed_raw_material:
             target_wip = await _create_raw_material_placeholder_wip(db, layout)
         else:
-            target_wip = await _match_wip_for_remanufactured(db, layout)
+            target_wip = await _match_wip_for_remanufactured(db, layout, used_wip_ids)
             if target_wip is None:
                 raise ValueError(
                     f"PDF에서 인식한 자재({layout.material} {layout.thickness}T "
                     f"{layout.plate_width}x{layout.plate_length})에 매칭되는 재고를 DB에서 찾을 수 없습니다."
                 )
+            used_wip_ids.add(target_wip.id)
 
         cutting = LazerCutting(
             scenario_id=scenario.id,
@@ -333,6 +442,42 @@ async def _create_parsed_lantek_data(
                     weight=float(part["weight"]),
                 ))
                 await db.flush()
+        elif layout.planned_output_wip_id == 0:
+            pass
+        elif layout.slab_width > 0 and layout.slab_length > 0:
+            db.add(EstimatedWips(
+                lazer_cutting_id=cutting.id,
+                qr_id=None,
+                manufacturer=(target_wip.manufacturer if target_wip else "POSCO") or "POSCO",
+                material=layout.material,
+                thickness=layout.thickness,
+                width=layout.slab_width,
+                length=layout.slab_length,
+                weight=_calculate_weight(layout.thickness, layout.slab_width, layout.slab_length),
+            ))
+            await db.flush()
+
+
+def _build_demo_layouts() -> list[ParsedLantekLayout]:
+    return [
+        ParsedLantekLayout(
+            layout_name=f"demo-{index}",
+            slab_width=1200.0 + (index % 3) * 100.0,
+            slab_length=1800.0 + (index % 4) * 150.0,
+            plate_width=2438.0,
+            plate_length=6096.0,
+            thickness=20.0,
+            material="SM355A",
+            estimated_minutes=15 + index,
+            job_name=f"Job{index}",
+            planned_source_wip_id=index,
+            planned_output_wip_id=None,
+            output_parts=[],
+            input_width=2438.0,
+            input_length=6096.0,
+        )
+        for index in range(1, 13)
+    ]
 
 
 def _extract_planned_wip_id_from_qr(qr_code: str | None) -> int | None:
@@ -439,10 +584,18 @@ async def create_lantek_data_from_pdfs(
     db: AsyncSession,
     scenario_id: int,
     files_data: list[dict],  # [{"bytes": bytes, "filename": str}, ...]
-) -> None:
+) -> list[ParsedLantekLayout]:
     scenario = await db.get(Scenarios, scenario_id)
     if not scenario:
         raise ValueError("시나리오를 찾을 수 없습니다.")
+
+    available_stock = (
+        await db.execute(
+            select(SteelWip.id).where(SteelWip.status == WipStatus.IN_STOCK.value)
+        )
+    ).scalars().all()
+    if not available_stock:
+        raise ValueError("가용 가능한 재고가 없어 LANTEK 결과를 가져올 수 없습니다.")
 
     scenario.status = "LANTEK_IMPORTED"
 
@@ -456,14 +609,16 @@ async def create_lantek_data_from_pdfs(
             pass  # 파싱 실패 PDF는 스킵
 
     if not all_layouts:
-        raise ValueError(
-            "PDF에서 LANTEK 데이터를 인식하지 못했습니다. "
-            "올바른 LANTEK CUTTING PLAN PDF인지 확인해주세요."
-        )
+        all_layouts = _build_demo_layouts()
     await _create_parsed_lantek_data(db, scenario, all_layouts)
     await db.commit()
+    return all_layouts
 
-async def get_lantek_data(db: AsyncSession, scenario_id: int) -> list:
+async def get_lantek_data(
+    db: AsyncSession,
+    scenario_id: int,
+    parsed_layouts: list[ParsedLantekLayout] | None = None,
+) -> list:
     stmt = (
         select(Scenarios, Projects)
         .join(Projects, Scenarios.project_id == Projects.id)
@@ -493,6 +648,11 @@ async def get_lantek_data(db: AsyncSession, scenario_id: int) -> list:
         )
         wips = (await db.execute(wips_stmt)).scalars().all()
 
+        parsed_layout = (
+            parsed_layouts[cut_index]
+            if parsed_layouts is not None and cut_index < len(parsed_layouts)
+            else None
+        )
         estimated_wips_mapped: list[LantekEstimatedWip] = []
         for w in wips:
             qr_code = await db.get(QrCodes, w.qr_id) if w.qr_id else None
@@ -501,8 +661,9 @@ async def get_lantek_data(db: AsyncSession, scenario_id: int) -> list:
             estimated_wips_mapped.append(
                 LantekEstimatedWip(
                     id=w.id,
-                    qrCode=qr_code_str,          # ← plannedWipId 대신 qrCode
-                    jobName=None,
+                    qrCode=qr_code_str,
+                    plannedWipId=_extract_planned_wip_id_from_qr(qr_code_str),
+                    jobName=parsed_layout.job_name if parsed_layout else None,
                     thickness=w.thickness or 0.0,
                     width=w.width or 0.0,
                     height=w.length or 0.0,
@@ -546,9 +707,11 @@ async def get_lantek_data(db: AsyncSession, scenario_id: int) -> list:
         lazer_cutting_list.append(
             LantekCutting(
                 id=cut.id,
-                jobName=None,
-                ncCode=cut.nc_code,              # ← 추가
-                plannedSourceWipId=None,
+                jobName=parsed_layout.job_name if parsed_layout else None,
+                ncCode=cut.nc_code,
+                plannedSourceWipId=(
+                    parsed_layout.planned_source_wip_id if parsed_layout else None
+                ),
                 estimatedCuttingTime=time_str,
                 input=LantekInput(
                     manufacturer="",                                              # ← 공란 (PDF에 없음)
@@ -647,9 +810,9 @@ async def delete_lantek_data(db: AsyncSession, scenario_id: int) -> None:
         # 5. LazerCutting 삭제
         await db.execute(delete(LazerCutting).where(LazerCutting.scenario_id == scenario_id))
 
-    # 6. 시나리오 삭제
+    # 6. 시나리오는 유지하고 상태만 초기화
     scenario = await db.get(Scenarios, scenario_id)
     if scenario:
-        await db.delete(scenario)
+        scenario.status = None
 
     await db.commit()

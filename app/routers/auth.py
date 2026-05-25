@@ -5,12 +5,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
 from pydantic import BaseModel
 from typing import Optional
-import bcrypt
 from jose import jwt, JWTError
 
 from app.database import async_session
 from app.models import Users
 from app.core.config import settings
+from app.core.security import verify_password
 
 import uuid
 from app.models import TokenBlacklist
@@ -21,9 +21,6 @@ SECRET_KEY = settings.JWT_SECRET_KEY
 ALGORITHM = settings.JWT_ALGORITHM
 ACCESS_TOKEN_EXPIRE_MINUTES = settings.JWT_EXPIRE_MINUTES
 REFRESH_TOKEN_EXPIRE_DAYS = 7
-
-def verify_password(plain: str, hashed: str) -> bool:
-    return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
 
 async def get_db():
     async with async_session() as session:

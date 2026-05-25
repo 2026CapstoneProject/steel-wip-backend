@@ -24,22 +24,35 @@ async def get_lantek_scenario(scenario_id: int, db: AsyncSession = Depends(get_d
 @router.post("/import", response_model=BaseResponse[List[LantekScenarioData]])
 async def import_lantek_pdf(
     scenario_id: int = Form(..., description="데이터를 연결할 시나리오 ID"),
-    files: List[UploadFile] = File(...),  # 단일 → 복수
+    files: List[UploadFile] | None = File(None),
+    file: UploadFile | None = File(None),
     db: AsyncSession = Depends(get_db)
 ):
     try:
+        upload_files: List[UploadFile] = []
+        if files:
+            upload_files.extend(files)
+        if file is not None:
+            upload_files.append(file)
+        if not upload_files:
+            raise HTTPException(status_code=422, detail="files 또는 file 업로드가 필요합니다.")
+
         files_data = []
-        for f in files:
+        for f in upload_files:
             file_bytes = await f.read()
             files_data.append({"bytes": file_bytes, "filename": f.filename})
 
-        await lantek_service.create_lantek_data_from_pdfs(
+        parsed_layouts = await lantek_service.create_lantek_data_from_pdfs(
             db,
             scenario_id,
             files_data=files_data,
         )
 
-        data = await lantek_service.get_lantek_data(db, scenario_id)
+        data = await lantek_service.get_lantek_data(
+            db,
+            scenario_id,
+            parsed_layouts=parsed_layouts,
+        )
         return BaseResponse(
             status=201,
             message="LANTEK 결과 처리에 성공했습니다.",

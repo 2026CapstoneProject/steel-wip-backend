@@ -10,7 +10,7 @@ class UserBase(BaseModel):
     user_num: int
 
 class UserCreate(UserBase):
-    pass
+    password: Optional[str] = None
 
 class UserUpdate(BaseModel):
     username: Optional[str] = None

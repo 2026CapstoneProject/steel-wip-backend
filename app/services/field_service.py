@@ -726,11 +726,8 @@ async def get_field_end(db: AsyncSession, batch_id: Optional[int] = None) -> lis
     completed_count: int = (await db.execute(completed_count_stmt)).scalar() or 0
 
     # ✅ 재공품 없는 미완료 배치가 있으면 분모에 1 추가
-    has_incomplete_no_wip_batch = await _has_incomplete_no_wip_batch(db, scenario.id)
-    effective_total = total + (1 if has_incomplete_no_wip_batch else 0)
-
-    progress_rate = round(completed_count / effective_total, 2) if effective_total > 0 else 0.0
-    remaining_count = max(effective_total - completed_count, 0)
+    progress_rate = round(completed_count / total, 2) if total > 0 else 0.0
+    remaining_count = max(total - completed_count, 0)
 
     # 4. ✅ 현장에서 완료된 모든 작업 조회 (배치 전체 완료 여부와 관계없음)
     # "작업 완료" = 현장에서 실제로 완료된 아이템들 (상태=COMPLETED)
@@ -743,6 +740,8 @@ async def get_field_end(db: AsyncSession, batch_id: Optional[int] = None) -> lis
 
     completed_groups: list[FieldBatchGroup] = []
     for batch in all_batches:
+        if not await _is_batch_completed(db, batch.id):
+            continue
         # 배치 내 완료된 아이템만 필터링 (배치 전체 완료 여부는 상관없음)
         group = await _build_batch_group(db, batch, only_completed=True)
 
@@ -757,7 +756,7 @@ async def get_field_end(db: AsyncSession, batch_id: Optional[int] = None) -> lis
             scenarioTitle=scenario.title,
             scenarioProgressRate=progress_rate,
             completedTaskCount=completed_count,
-            totalTaskCount=total,
+        totalTaskCount=total,
             remainingTaskCount=remaining_count,
             batch=completed_groups,
         )
@@ -989,6 +988,7 @@ async def _build_progress_wip_item(
     estimated_wip: EstimatedWips,
     cutting_done: bool = False,  # ✅ 절단 완료 여부 파라미터 추가
 ) -> ProgressWipItem:
+    actual_wip = await db.get(SteelWip, inbound_item.steel_wip_id) if inbound_item.steel_wip_id else None
     qr_code_value = None
     if estimated_wip.qr_id:
         qr = await db.get(QrCodes, estimated_wip.qr_id)
@@ -1014,20 +1014,25 @@ async def _build_progress_wip_item(
         else None
     )
 
-    # ✅ cutting_done 기반으로 상태 결정
-    # - 절단 완료: "적재 대기" (스캔하여 적재 가능)
-    # - 절단 진행중: "생성 대기" (아직 적재 불가, 표시만)
-    item_status = "적재 대기" if cutting_done else "생성 대기"
+    inbound_status = _get_enum_value(inbound_item.status) or "PENDING"
+    if not cutting_done:
+        item_status = "생성 대기"
+    elif inbound_status == "COMPLETED":
+        item_status = "적재 완료"
+    elif inbound_status == "IN_PROGRESS":
+        item_status = "적재 대기"
+    else:
+        item_status = inbound_status
 
     return ProgressWipItem(
-        wipId=estimated_wip.id,
+        wipId=inbound_item.steel_wip_id or estimated_wip.id,
         batchItemId=inbound_item.id,
         wipQr=qr_code_value,
-        manufacturer=estimated_wip.manufacturer,
-        material=estimated_wip.material,
+        manufacturer=(actual_wip.manufacturer if actual_wip else estimated_wip.manufacturer),
+        material=(actual_wip.material if actual_wip else estimated_wip.material),
         specText=spec_text,
         weightText=weight_text,
-        wipStatus="GENERATED",
+        wipStatus=_get_enum_value(actual_wip.status) if actual_wip else "GENERATED",
         wipName=wip_name,
         toLocation=to_loc.loc_name if to_loc else None,
         status=item_status,
@@ -1043,8 +1048,6 @@ async def _get_pending_inbound_entries(
         .where(
             BatchItems.batch_id == batch_id,
             BatchItems.batch_item_action == "INBOUND",
-            BatchItems.status != "COMPLETED",
-            BatchItems.estimated_wip_id.is_not(None),
         )
         .order_by(BatchItems.batch_item_order.asc(), BatchItems.id.asc())
     )
@@ -1053,6 +1056,16 @@ async def _get_pending_inbound_entries(
     entries = []
     for inbound_item in pending_inbound_items:
         estimated_wip = await db.get(EstimatedWips, inbound_item.estimated_wip_id)
+        if estimated_wip is None and inbound_item.steel_wip_id:
+            actual_wip = await db.get(SteelWip, inbound_item.steel_wip_id)
+            if actual_wip and actual_wip.qr_id:
+                estimated_wip = (
+                    await db.execute(
+                        select(EstimatedWips)
+                        .where(EstimatedWips.qr_id == actual_wip.qr_id)
+                        .order_by(EstimatedWips.id.asc())
+                    )
+                ).scalars().first()
         if estimated_wip is None:
             continue
         entries.append({
@@ -1215,6 +1228,26 @@ async def _get_current_processing_context(
                 "has_output": False,
             }
 
+    if lazer_cuttings:
+        fallback_lc = lazer_cuttings[0]
+        linked_pending_entries = [
+            entry for entry in pending_inbound_entries
+            if entry["lazer_cutting_id"] == fallback_lc.id
+        ]
+        output_count = (
+            await db.execute(
+                select(func.count(EstimatedWips.id)).where(
+                    EstimatedWips.lazer_cutting_id == fallback_lc.id
+                )
+            )
+        ).scalar() or 0
+        return {
+            "lc": fallback_lc,
+            "linked_pending_entries": linked_pending_entries,
+            "cutting_done": True,
+            "has_output": output_count > 0,
+        }
+
     return None
 
 
@@ -1233,15 +1266,14 @@ async def _get_active_processing_state(
         if batch.completed_at is not None:
             continue
 
-        if not await _has_started_processing_item(db, batch.id):
-            continue
-
         lc_stmt = (
             select(LazerCutting)
             .where(LazerCutting.batch_id == batch.id)
             .order_by(LazerCutting.id.asc())
         )
         lazer_cuttings = (await db.execute(lc_stmt)).scalars().all()
+        if not lazer_cuttings:
+            continue
         pending_inbound_entries = await _get_pending_inbound_entries(db, batch.id)
         context = await _get_current_processing_context(
             db,
@@ -1304,15 +1336,33 @@ async def _build_field_progress_for_scenario(
                 )
             )
 
-    lc_groups = [
-        ProgressLazerCutting(
-            lazerCuttingId=current_lc.id,
-            inputWipId=input_wip_id,
-            material=material,
-            estimatedCuttingTime=estimated_cutting_time,
-            wip=current_wip_items,
+    lc_groups: list[ProgressLazerCutting] = []
+    for lc in lazer_cuttings:
+        lc_input_wip = await db.get(SteelWip, lc.steel_wip_id) if lc.steel_wip_id else None
+        lc_entries = [
+            entry for entry in pending_inbound_entries
+            if entry["lazer_cutting_id"] == lc.id
+        ]
+        lc_wip_items = [
+            await _build_progress_wip_item(
+                db,
+                entry["item"],
+                entry["estimated_wip"],
+                cutting_done=True,
+            )
+            for entry in lc_entries
+        ]
+        lc_groups.append(
+            ProgressLazerCutting(
+                lazerCuttingId=lc.id,
+                inputWipId=lc_input_wip.id if lc_input_wip else 0,
+                material=(
+                    lc_input_wip.material if lc_input_wip else (lc.input_material or "")
+                ),
+                estimatedCuttingTime=lc.estimated_cutting_time or 0,
+                wip=lc_wip_items,
+            )
         )
-    ]
 
     batch_progress_rate = (
         round(min(consumed_minutes / expected_total, 1.0), 2)
@@ -1357,7 +1407,6 @@ async def get_field_progress(db: AsyncSession) -> list:
         select(Scenarios)
         .where(
             Scenarios.status.in_(["ORDERED", "IN_PROGRESS"]),
-            Scenarios.scenario_order > 0,
         )
         .order_by(Scenarios.scenario_order.asc())
     )
@@ -1390,7 +1439,6 @@ async def get_field_ready(db: AsyncSession) -> list:
         select(Scenarios)
         .where(
             Scenarios.status.in_(["ORDERED", "IN_PROGRESS"]),
-            Scenarios.scenario_order > 0,
         )
         .order_by(Scenarios.scenario_order.asc())
     )
@@ -1421,17 +1469,8 @@ async def get_field_ready(db: AsyncSession) -> list:
         )
         completed_count: int = (await db.execute(completed_count_stmt)).scalar() or 0
 
-        has_incomplete_no_wip_batch = await _has_incomplete_no_wip_batch(db, scenario.id)
-        effective_total = total + (1 if has_incomplete_no_wip_batch else 0)
-
-        progress_rate = round(completed_count / effective_total, 2) if effective_total > 0 else 0.0
-        remaining_count = max(effective_total - completed_count, 0)
-
-        has_incomplete_no_wip_batch = await _has_incomplete_no_wip_batch(db, scenario.id)
-        effective_total = total + (1 if has_incomplete_no_wip_batch else 0)
-
-        progress_rate = round(completed_count / effective_total, 2) if effective_total > 0 else 0.0
-        remaining_count = max(effective_total - completed_count, 0)
+        progress_rate = round(completed_count / total, 2) if total > 0 else 0.0
+        remaining_count = max(total - completed_count, 0)
 
         # ── 4. 현재 배치 집계 (ready / processing 기준) ──────────────────
         active_ready_batch = await _get_active_ready_batch(db, scenario.id)
@@ -1439,13 +1478,14 @@ async def get_field_ready(db: AsyncSession) -> list:
         active_processing_batch = (
             active_processing_state["batch"] if active_processing_state else None
         )
+        first_incomplete_batch = await _get_first_incomplete_batch(db, scenario.id)
 
         current_batch_remaining_count = 0
         current_batch_pending_inbound_count = 0
         requires_production_completion = False
         blocking_production_batch_id: Optional[int] = None
 
-        current_focus_batch = active_ready_batch or active_processing_batch
+        current_focus_batch = active_processing_batch or first_incomplete_batch or active_ready_batch
         if current_focus_batch:
             current_batch_remaining_count = await _count_incomplete_items_in_batch(
                 db, current_focus_batch.id
@@ -1474,6 +1514,10 @@ async def get_field_ready(db: AsyncSession) -> list:
 
         batch_groups: list[FieldBatchGroup] = []
         for batch in all_batches:
+            if batch.completed_at is not None:
+                continue
+            if first_incomplete_batch is not None and batch.id == first_incomplete_batch.id:
+                continue
             group = await _build_batch_group(db, batch, exclude_completed=True)
             if group.relocation or group.picking:
                 batch_groups.append(group)
@@ -1544,7 +1588,13 @@ async def _get_qr_scan_data(
     lc = await _resolve_batch_item_lazer_cutting(db, item)
     lazer_name = await _get_lazer_name_for_batch(db, item.batch_id)
 
-    is_raw_material = (estimated_wip is None) and ((wip is None) or (wip.qr_id is None))
+    is_raw_material = bool(
+        estimated_wip is None
+        and (
+            item.steel_wip_id is None
+            or _is_raw_material_wip(wip)
+        )
+    )
 
     if action_type == "INBOUND":
         from_loc_name: Optional[str] = lazer_name
@@ -1588,8 +1638,7 @@ async def _get_qr_scan_data(
         weight=weight or 0.0,
         fromLocationName=from_loc_name,
         toLocationName=to_loc_name,
-        # ▼ 수정: 원자재면 itemScan을 True로 고정 (스캔 단계 없음)
-        itemScan=True if is_raw_material else (item.item_scanned_at is not None),
+        itemScan=item.item_scanned_at is not None if not is_raw_material else False,
         destinationScan=item.destination_scanned_at is not None,
     )
 
@@ -1719,6 +1768,9 @@ async def save_qr_action(db: AsyncSession, batch_item_id: int, req: QrSaveReques
 
     # wipQR 검증 (QR 값이 제공된 경우에만)
     wip = None
+    if action == "PICKING" and item.steel_wip_id is not None and not req.wipQR:
+        raise HTTPException(status_code=400, detail="피킹 대상 잔재의 QR 스캔이 필요합니다.")
+
     if item.steel_wip_id is not None:
         wip = await db.get(SteelWip, item.steel_wip_id)
         if req.wipQR:
