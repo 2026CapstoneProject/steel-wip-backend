@@ -14,6 +14,7 @@ router = APIRouter()
 @router.get("/", response_model=BaseResponse[List[SentProjectHistory]])
 async def get_sent_scenario_history(
     projectName: Optional[str] = Query(None, description="프로젝트 명 검색"),
+    scenarioName: Optional[str] = Query(None, description="생산계획명 검색"),
     projDueMin: Optional[date] = Query(None, description="프로젝트 납기 최소일"),
     projDueMax: Optional[date] = Query(None, description="프로젝트 납기 최대일"),
     scenDueMin: Optional[date] = Query(None, description="시나리오 납기 최소일"),
@@ -25,6 +26,7 @@ async def get_sent_scenario_history(
     data = await scenario_service.get_sent_scenario_history(
         db=db,
         project_name=projectName,
+        scenario_name=scenarioName,
         proj_due_min=projDueMin,
         proj_due_max=projDueMax,
         scen_due_min=scenDueMin,

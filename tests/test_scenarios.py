@@ -532,6 +532,30 @@ async def test_scenario_send_history_filter_project_name(
     assert data[0]["projectTitle"] == "포스코 건설"
 
 
+@pytest.mark.asyncio
+async def test_scenario_send_history_filter_scenario_name(
+    client: AsyncClient, db_session: AsyncSession
+):
+    """scenarioName 필터로 특정 생산계획 이력만 조회"""
+    project = await make_project(db_session, title="포스코 건설")
+    target = await make_scenario(
+        db_session, project.id, status="ORDERED", title="포스코 건설-1차 계획"
+    )
+    other = await make_scenario(
+        db_session, project.id, status="ORDERED", title="포스코 건설-2차 계획"
+    )
+    target.ordered_at = datetime(2026, 3, 1)
+    other.ordered_at = datetime(2026, 3, 2)
+    await db_session.commit()
+
+    response = await client.get("/api/scenario_send/", params={"scenarioName": "1차"})
+
+    data = response.json()["data"]
+    assert len(data) == 1
+    assert len(data[0]["scenarios"]) == 1
+    assert data[0]["scenarios"][0]["scenarioTitle"] == "포스코 건설-1차 계획"
+
+
 # ══════════════════════════════════════════════════════════════════════
 # POST /api/scenario_send/{scenario_id} — 시나리오 현장 전송
 # ══════════════════════════════════════════════════════════════════════
