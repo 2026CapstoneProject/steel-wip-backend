@@ -4,7 +4,7 @@ from pydantic import Field
 from typing import List,Optional
 # datetime과 함께 date도 임포트
 from datetime import datetime, date 
-from app.schemas.enums import ScenarioStatus, LazerType
+from app.schemas.enums import ScenarioStatus, LazerType, CuttingPriority
 
 class ScenarioBase(BaseModel):
     title: str
@@ -12,6 +12,7 @@ class ScenarioBase(BaseModel):
     status: Optional[ScenarioStatus] = None
     scenario_due: date  # datetime -> date 수정
     lazer_name: Optional[LazerType] = None
+    process_priority: Optional[CuttingPriority] = CuttingPriority.LOW
     project_id: Optional[int] = None
     creator_id: Optional[int] = None
     assignee_id: Optional[int] = None
@@ -35,8 +36,8 @@ class ScenarioResponse(ScenarioBase):
 class ScenarioCreateRequest(BaseModel):
     project_id: int
     scenario_due: date
-    # 필요하다면 lazer_name 등도 받을 수 있지만 일단 필수값만 정의
-    lazer_name: Optional[str] = "LAZER1"
+    lazer_name: Optional[LazerType] = LazerType.LAZER1
+    process_priority: Optional[CuttingPriority] = CuttingPriority.LOW
 
 
 

@@ -20,7 +20,7 @@ from app.schemas.scenario import (
     ScenarioJobScheduleItem,
     ScenarioCraneScheduleItem,
 )
-from app.schemas.enums import BatchActionType
+from app.schemas.enums import BatchActionType, CuttingPriority, LazerType
 
 from app.schemas.scenario import ScenarioHistoryItem, ProjectScenarioHistory, SentScenarioItem, SentProjectHistory
 from app.schemas.batch_item import BatchItemStatus
@@ -32,6 +32,10 @@ from app.models import SteelWipStatus
 
 def _normalize_action_key(value) -> str:
     return value.value if hasattr(value, "value") else str(value)
+
+
+def _enum_to_value(value):
+    return value.value if hasattr(value, "value") else value
 
 
 def _is_crane_move_action(action_key: str) -> bool:
@@ -269,7 +273,13 @@ async def _build_solver_payload(
     return solver_summary, job_schedule, crane_schedule, makespan_minutes, move_objective
 
 
-async def get_or_create_scenario(db: AsyncSession, project_id: int, scenario_due: date) -> Scenarios:
+async def get_or_create_scenario(
+    db: AsyncSession,
+    project_id: int,
+    scenario_due: date,
+    lazer_name: Optional[LazerType] = LazerType.LAZER1,
+    process_priority: Optional[CuttingPriority] = CuttingPriority.LOW,
+) -> Scenarios:
     """
     POST: 생산계획명 생성 로직 (수정됨)
     - 동일한 프로젝트 + due를 가진 시나리오 중 status가 None인 것이 있다면 재사용
@@ -289,6 +299,9 @@ async def get_or_create_scenario(db: AsyncSession, project_id: int, scenario_due
     # 2. 아직 편집 중인 시나리오(status=None)가 있으면 재사용
     for scenario in existing_scenarios:
         if scenario.status is None:
+            scenario.lazer_name = _enum_to_value(lazer_name) or "LAZER1"
+            scenario.process_priority = _enum_to_value(process_priority) or "LOW"
+            await db.flush()
             return scenario
             
     # 3. 만약 모두 status가 None이 아니라면(이미 진행 중이라면)
@@ -321,7 +334,8 @@ async def get_or_create_scenario(db: AsyncSession, project_id: int, scenario_due
         status=None,
         created_at=datetime.now(),
         scenario_due=scenario_due,
-        lazer_name="LAZER1",
+        lazer_name=_enum_to_value(lazer_name) or "LAZER1",
+        process_priority=_enum_to_value(process_priority) or "LOW",
         emergency_or_not=False,
         project_id=project_id,
         creator_id=None,

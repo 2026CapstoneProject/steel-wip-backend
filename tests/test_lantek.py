@@ -284,6 +284,35 @@ async def test_import_lantek_success(client: AsyncClient, db_session: AsyncSessi
     await db_session.refresh(scenario)
     assert scenario.status == "LANTEK_IMPORTED"
 
+
+@pytest.mark.asyncio
+async def test_import_lantek_uses_scenario_process_priority(
+    client: AsyncClient, db_session: AsyncSession
+):
+    project = await make_project(db_session, title="우선순위 테스트 프로젝트")
+    scenario = await make_scenario(db_session, project.id, title="우선순위 테스트 시나리오")
+    scenario.process_priority = "HIGH"
+    await make_wip_in_stock(db_session)
+    await db_session.commit()
+
+    files = [("file", ("demo.pdf", b"%PDF-1.4 demo", "application/pdf"))]
+    response = await client.post(
+        "/api/lantek/import",
+        data={"scenario_id": str(scenario.id)},
+        files=files,
+    )
+
+    assert response.status_code == 200
+
+    priorities = (
+        await db_session.execute(
+            select(LazerCutting.priority).where(LazerCutting.scenario_id == scenario.id)
+        )
+    ).scalars().all()
+
+    assert priorities
+    assert all(priority == "HIGH" for priority in priorities)
+
     # LazerCutting 12개 생성 확인
     lc_count_result = await db_session.execute(
         select(LazerCutting).where(LazerCutting.scenario_id == scenario.id)
