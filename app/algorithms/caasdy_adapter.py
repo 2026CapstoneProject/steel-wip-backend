@@ -261,7 +261,6 @@ async def _query_cutting_records(
             if source_wip and (
                 is_allowed_raw_material
                 or source_wip.location_id is None
-                or source_wip.stack_level is None
             ):
                 actual_wip_id = None
         elif is_allowed_raw_material:
@@ -372,7 +371,18 @@ async def _get_s4_location_map(db: AsyncSession) -> Dict[str, int]:
             .where(Locations.loc_name.in_(s4_names))
         )
     ).all()
-    return {name: lid for name, lid in rows if name}
+    location_map = {name: lid for name, lid in rows if name}
+    if len(location_map) == len(s4_names):
+        return location_map
+
+    missing_names = [name for name in s4_names if name not in location_map]
+    for name in missing_names:
+        location = Locations(loc_name=name, loc_can_stock=0, loc_stack_height=0)
+        db.add(location)
+        await db.flush()
+        location_map[name] = location.id
+
+    return location_map
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

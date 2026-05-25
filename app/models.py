@@ -7,6 +7,8 @@ from sqlalchemy.dialects.mysql import TINYINT
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from sqlalchemy import UniqueConstraint
+from app.core.clock import utc_now_naive
+from app.core.security import generate_unusable_password_hash
 
 class Base(DeclarativeBase):
     pass
@@ -125,11 +127,19 @@ class Users(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     username: Mapped[str] = mapped_column(String(50), nullable=False)
-    password: Mapped[str] = mapped_column(String(255), nullable=False)   # ← 추가
+    password: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+        default=generate_unusable_password_hash,
+    )
     department: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[UsersRole] = mapped_column(Enum(UsersRole, values_callable=lambda cls: [member.value for member in cls]), nullable=False)
     user_num: Mapped[int] = mapped_column(Integer, nullable=False)
-    created_at: Mapped[Optional[datetime.datetime]] = mapped_column(TIMESTAMP, server_default=text('(now())'))   # ← 추가
+    created_at: Mapped[Optional[datetime.datetime]] = mapped_column(
+        TIMESTAMP,
+        nullable=False,
+        default=utc_now_naive,
+    )
     last_login_at: Mapped[Optional[datetime.datetime]] = mapped_column(TIMESTAMP, nullable=True)                 # ← 추가
 
     scenarios_assignee: Mapped[list['Scenarios']] = relationship('Scenarios', foreign_keys='[Scenarios.assignee_id]', back_populates='assignee')
@@ -150,7 +160,11 @@ class Scenarios(Base):
     status: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, default=None)
     scenario_due: Mapped[datetime.date] = mapped_column(Date, nullable=False)
     scenario_order: Mapped[Optional[int]] = mapped_column(Integer, server_default=text("'0'"))
-    created_at: Mapped[Optional[datetime.datetime]] = mapped_column(TIMESTAMP, server_default=text('(now())'))
+    created_at: Mapped[Optional[datetime.datetime]] = mapped_column(
+        TIMESTAMP,
+        nullable=False,
+        default=utc_now_naive,
+    )
     ordered_at: Mapped[Optional[datetime.datetime]] = mapped_column(TIMESTAMP)
     completed_at: Mapped[Optional[datetime.datetime]] = mapped_column(TIMESTAMP)
     lazer_name: Mapped[Optional[ScenariosLazerName]] = mapped_column(Enum(ScenariosLazerName, values_callable=lambda cls: [member.value for member in cls]))
@@ -331,5 +345,9 @@ class TokenBlacklist(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     jti: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)  # JWT ID
     expired_at: Mapped[datetime.datetime] = mapped_column(TIMESTAMP, nullable=False)  # 토큰 만료시각
-    created_at: Mapped[Optional[datetime.datetime]] = mapped_column(TIMESTAMP, server_default=text('(now())'))
+    created_at: Mapped[Optional[datetime.datetime]] = mapped_column(
+        TIMESTAMP,
+        nullable=False,
+        default=utc_now_naive,
+    )
     

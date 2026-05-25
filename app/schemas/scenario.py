@@ -75,15 +75,22 @@ class ScenarioJobScheduleItem(BaseModel):
 
 class ScenarioCraneScheduleItem(BaseModel):
     order: int
+    batchItemId: Optional[int] = None
+    batchId: Optional[int] = None
+    batchItemOrder: Optional[int] = None
     action: str
     steelWipId: int
     qrCode: Optional[str] = None
+    ncCode: Optional[str] = None
     thickness: Optional[float] = None
     width: Optional[float] = None
     length: Optional[float] = None
     fromLocation: str
     toLocation: str
     eventMinute: float
+    expectedStartMinute: Optional[float] = None
+    expectedDurationMinutes: Optional[float] = None
+    expectedEndMinute: Optional[float] = None
     moveType: Optional[str] = None
 
 class ScenarioResultData(BaseModel):

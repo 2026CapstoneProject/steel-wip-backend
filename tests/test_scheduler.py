@@ -129,11 +129,18 @@ async def test_scheduler_main_demo_result_is_visible_in_scenario_result(
     assert scenario_result["jobSchedule"][1]["outputWips"] == [103]
     assert len(scenario_result["craneSchedule"]) == 12
     assert scenario_result["craneSchedule"][0]["action"] == "RELOCATE"
+    assert scenario_result["craneSchedule"][0]["batchItemId"] is not None
+    assert scenario_result["craneSchedule"][0]["batchId"] is not None
+    assert scenario_result["craneSchedule"][0]["batchItemOrder"] is not None
+    assert scenario_result["craneSchedule"][0]["expectedStartMinute"] == 0.0
+    assert scenario_result["craneSchedule"][0]["expectedDurationMinutes"] == 5.0
+    assert scenario_result["craneSchedule"][0]["expectedEndMinute"] == 5.0
     assert scenario_result["craneSchedule"][-1]["steelWipId"] == 103
     assert all(item["qrCode"] for item in scenario_result["craneSchedule"])
     assert all(item["thickness"] is not None for item in scenario_result["craneSchedule"])
     assert all(item["width"] is not None for item in scenario_result["craneSchedule"])
     assert all(item["length"] is not None for item in scenario_result["craneSchedule"])
+    assert any(item["ncCode"] for item in scenario_result["craneSchedule"])
     assert any(
         item["steelWipId"] == 78
         and item["thickness"] == 12.0
