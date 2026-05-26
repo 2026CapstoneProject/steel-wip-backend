@@ -790,7 +790,9 @@ async def get_live_field_data(db: AsyncSession, lazer_name: str) -> List[FieldBa
         select(BatchItems)
         .where(
             BatchItems.batch_id.in_(batch_ids),
-            # COMPLETED도 포함 — 카드는 유지하고 배지만 바꿈
+            # COMPLETED / INBOUND도 포함한다.
+            # 실시간 현장 조회 타임라인은 완료 배치와 적재 대기까지 모두 보여줘야 한다.
+            # 상단 "남은 작업" 카운트는 프론트에서 완료/적재를 제외한 값으로 집계한다.
             # (시나리오 자체가 COMPLETED될 때 위의 scenario 쿼리에서 이미 필터됨)
         )
         .order_by(
