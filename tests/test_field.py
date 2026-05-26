@@ -2217,3 +2217,125 @@ async def test_ready_picking_item_has_expected_running_time(
     picking = response.json()["data"][0]["batch"][0]["picking"]
     assert len(picking) == 1
     assert picking[0]["expectedRunningTime"] == 20
+
+
+@pytest.mark.asyncio
+async def test_live_field_dashboard_summary_rule_can_exclude_completed_and_inbound(
+    client: AsyncClient, db_session: AsyncSession
+):
+    """
+    실시간 현장 조회 타임라인은 COMPLETED / INBOUND도 그대로 노출한다.
+    다만 상단 "남은 작업" 카드 숫자는 완료 작업과 적재를 제외한
+    RELOCATE / PICKING 미완료 건만 세도록 프론트에서 집계할 수 있어야 한다.
+    """
+    a1 = await make_location(db_session, "A-1")
+    a2 = await make_location(db_session, "A-2")
+    a3 = await make_location(db_session, "A-3")
+    b1 = await make_location(db_session, "B-1")
+    b2 = await make_location(db_session, "B-2")
+    b3 = await make_location(db_session, "B-3")
+    s41 = await make_location(db_session, "S4-1")
+    s42 = await make_location(db_session, "S4-2")
+    inbound1 = await make_location(db_session, "C-1")
+    inbound2 = await make_location(db_session, "C-2")
+
+    qr_values = []
+    for code in ["QR-78", "QR-37", "QR-17", "QR-73", "QR-28", "QR-99"]:
+        qr = QrCodes(qr_code=code)
+        db_session.add(qr)
+        qr_values.append(qr)
+    await db_session.flush()
+
+    wips = []
+    for idx, (loc_id, qr_id) in enumerate(
+        [
+            (a3.id, qr_values[0].id),
+            (b2.id, qr_values[1].id),
+            (a1.id, qr_values[2].id),
+            (a3.id, qr_values[3].id),
+            (a2.id, qr_values[4].id),
+            (b3.id, qr_values[5].id),
+        ],
+        start=1,
+    ):
+        wip = SteelWip(
+            status="IN_STOCK",
+            material="SM355A",
+            thickness=10.0 + idx,
+            width=600.0 + idx,
+            length=1200.0 + idx,
+            weight=100.0 + idx,
+            manufacturer="POSCO",
+            location_id=loc_id,
+            stack_level=1,
+            qr_id=qr_id,
+        )
+        db_session.add(wip)
+        wips.append(wip)
+    await db_session.flush()
+
+    scenario = await make_scenario(db_session, order=1, lazer_name="LAZER1")
+    batch1 = await make_batch(db_session, scenario.id, batch_order=1)
+    batch2 = await make_batch(db_session, scenario.id, batch_order=2)
+
+    batch1_items = [
+        (wips[0].id, a3.id, a1.id, "RELOCATE", "PENDING"),
+        (wips[1].id, b2.id, a2.id, "RELOCATE", "PENDING"),
+        (wips[2].id, a1.id, b1.id, "RELOCATE", "PENDING"),
+        (wips[3].id, a3.id, b3.id, "RELOCATE", "PENDING"),
+        (wips[4].id, a2.id, s41.id, "PICKING", "COMPLETED"),
+        (None, None, inbound1.id, "INBOUND", "PENDING"),
+    ]
+    batch2_items = [
+        (wips[0].id, a1.id, a3.id, "RELOCATE", "PENDING"),
+        (wips[1].id, a2.id, b2.id, "RELOCATE", "PENDING"),
+        (wips[3].id, b3.id, a3.id, "RELOCATE", "PENDING"),
+        (wips[2].id, b1.id, a1.id, "RELOCATE", "PENDING"),
+        (wips[5].id, b3.id, s42.id, "PICKING", "PENDING"),
+        (None, None, inbound2.id, "INBOUND", "PENDING"),
+    ]
+
+    for order, (wip_id, from_loc, to_loc, action, status) in enumerate(batch1_items, start=1):
+        db_session.add(
+            BatchItems(
+                batch_id=batch1.id,
+                steel_wip_id=wip_id,
+                batch_item_action=action,
+                status=status,
+                batch_item_order=order,
+                from_location=from_loc,
+                to_location=to_loc,
+                expected_start_time=(order - 1) * 5,
+                expected_running_time=5,
+            )
+        )
+
+    for order, (wip_id, from_loc, to_loc, action, status) in enumerate(batch2_items, start=1):
+        db_session.add(
+            BatchItems(
+                batch_id=batch2.id,
+                steel_wip_id=wip_id,
+                batch_item_action=action,
+                status=status,
+                batch_item_order=order,
+                from_location=from_loc,
+                to_location=to_loc,
+                expected_start_time=30 + (order - 1) * 5,
+                expected_running_time=5,
+            )
+        )
+
+    await db_session.commit()
+
+    response = await client.get("/api/field/LAZER1")
+
+    assert response.status_code == 200
+    items = response.json()["data"]
+    assert len(items) == 12
+
+    remaining_summary_count = sum(
+        1
+        for item in items
+        if item["status"] != "COMPLETED" and item["batchItemAction"] != "INBOUND"
+    )
+    assert remaining_summary_count == 9
