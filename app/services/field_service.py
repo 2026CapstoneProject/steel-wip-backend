@@ -1238,27 +1238,6 @@ async def _get_current_processing_context(
                 "has_output": False,
             }
 
-    if not found_started_item and lazer_cuttings:
-        fallback_lc = lazer_cuttings[0]
-        linked_pending_entries = [
-            entry for entry in pending_inbound_entries
-            if entry["lazer_cutting_id"] == fallback_lc.id
-        ]
-        output_count = (
-            await db.execute(
-                select(func.count(EstimatedWips.id)).where(
-                    EstimatedWips.lazer_cutting_id == fallback_lc.id
-                )
-            )
-        ).scalar() or 0
-        return {
-            "lc": fallback_lc,
-            "linked_pending_entries": linked_pending_entries,
-            "display_entries": linked_pending_entries,
-            "cutting_done": True,
-            "has_output": output_count > 0,
-        }
-
     return None
 
 
