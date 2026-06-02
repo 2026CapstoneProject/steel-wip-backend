@@ -448,18 +448,6 @@ async def _create_parsed_lantek_data(
                 await db.flush()
         elif layout.planned_output_wip_id == 0:
             pass
-        elif layout.slab_width > 0 and layout.slab_length > 0:
-            db.add(EstimatedWips(
-                lazer_cutting_id=cutting.id,
-                qr_id=None,
-                manufacturer=(target_wip.manufacturer if target_wip else "POSCO") or "POSCO",
-                material=layout.material,
-                thickness=layout.thickness,
-                width=layout.slab_width,
-                length=layout.slab_length,
-                weight=_calculate_weight(layout.thickness, layout.slab_width, layout.slab_length),
-            ))
-            await db.flush()
 
 
 def _build_demo_layouts() -> list[ParsedLantekLayout]:
@@ -657,31 +645,6 @@ async def get_lantek_data(
             if parsed_layouts is not None and cut_index < len(parsed_layouts)
             else None
         )
-        estimated_wips_mapped: list[LantekEstimatedWip] = []
-        for w in wips:
-            qr_code = await db.get(QrCodes, w.qr_id) if w.qr_id else None
-            qr_code_str = qr_code.qr_code if qr_code else None
- 
-            estimated_wips_mapped.append(
-                LantekEstimatedWip(
-                    id=w.id,
-                    qrCode=qr_code_str,
-                    plannedWipId=_extract_planned_wip_id_from_qr(qr_code_str),
-                    jobName=parsed_layout.job_name if parsed_layout else None,
-                    thickness=w.thickness or 0.0,
-                    width=w.width or 0.0,
-                    height=w.length or 0.0,
-                    weight=w.weight,
-                    memo=None,
-                )
-            )
-
-
-        total_minutes = cut.estimated_cutting_time or 0
-        hours = total_minutes // 60
-        mins = total_minutes % 60
-        time_str = f"{hours:02d}:{mins:02d}"
-
         source_wip = await db.get(SteelWip, cut.steel_wip_id) if cut.steel_wip_id else None
 
         # PDF 파싱값이 있으면 우선 사용, 없으면 source_wip fallback
@@ -707,6 +670,37 @@ async def get_lantek_data(
             )
             else "재공품"
         )
+
+        estimated_wips_mapped: list[LantekEstimatedWip] = []
+        for w in wips:
+            if (
+                w.qr_id is None
+                and float(w.width or 0.0) == float(input_width or 0.0)
+                and float(w.length or 0.0) == float(input_height or 0.0)
+            ):
+                continue
+
+            qr_code = await db.get(QrCodes, w.qr_id) if w.qr_id else None
+            qr_code_str = qr_code.qr_code if qr_code else None
+
+            estimated_wips_mapped.append(
+                LantekEstimatedWip(
+                    id=w.id,
+                    qrCode=qr_code_str,
+                    plannedWipId=_extract_planned_wip_id_from_qr(qr_code_str),
+                    jobName=parsed_layout.job_name if parsed_layout else None,
+                    thickness=w.thickness or 0.0,
+                    width=w.width or 0.0,
+                    height=w.length or 0.0,
+                    weight=w.weight,
+                    memo=None,
+                )
+            )
+
+        total_minutes = cut.estimated_cutting_time or 0
+        hours = total_minutes // 60
+        mins = total_minutes % 60
+        time_str = f"{hours:02d}:{mins:02d}"
 
         lazer_cutting_list.append(
             LantekCutting(

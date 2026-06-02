@@ -419,8 +419,8 @@ async def test_import_lantek_parses_pdf_layouts(monkeypatch, client: AsyncClient
     data = response.json()["data"][0]
     assert len(data["lazerCutting"]) == 2
     assert data["lazerCutting"][0]["estimatedCuttingTime"] == "00:56"
-    assert data["lazerCutting"][1]["estimatedWips"][0]["width"] == 2198.62
-    assert data["lazerCutting"][1]["estimatedWips"][0]["height"] == 1251.1
+    assert data["lazerCutting"][0]["estimatedWips"] == []
+    assert data["lazerCutting"][1]["estimatedWips"] == []
 
     cuttings = (
         await db_session.execute(select(LazerCutting).where(LazerCutting.scenario_id == scenario.id))
@@ -430,9 +430,13 @@ async def test_import_lantek_parses_pdf_layouts(monkeypatch, client: AsyncClient
 
 
 @pytest.mark.asyncio
-async def test_import_lantek_parsed_scrap_weight(monkeypatch, client: AsyncClient, db_session: AsyncSession):
+async def test_import_lantek_without_output_parts_returns_empty_estimated_wips(
+    monkeypatch,
+    client: AsyncClient,
+    db_session: AsyncSession,
+):
     """
-    PDF 파싱 경로에서는 슬랩 사이즈를 예상 잔재로 저장하고 무게도 계산한다.
+    PDF에 실제 재공품(output_parts)이 없으면 estimatedWips도 비어 있어야 한다.
     """
     project = await make_project(db_session)
     scenario = await make_scenario(db_session, project.id, status=None)
@@ -456,8 +460,7 @@ async def test_import_lantek_parsed_scrap_weight(monkeypatch, client: AsyncClien
     )
 
     assert response.status_code == 200
-    estimated = response.json()["data"][0]["lazerCutting"][0]["estimatedWips"][0]
-    assert estimated["weight"] == 188.4
+    assert response.json()["data"][0]["lazerCutting"][0]["estimatedWips"] == []
 
 
 @pytest.mark.asyncio
