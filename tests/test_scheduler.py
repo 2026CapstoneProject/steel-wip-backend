@@ -5,6 +5,7 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.algorithms.caasdy_adapter import _estimate_batch_item_running_time
 from app.models import Batch, BatchItems, EstimatedWips, LazerCutting, Projects, Scenarios, SteelWip
 
 
@@ -170,3 +171,60 @@ async def test_scheduler_main_demo_result_is_visible_in_scenario_result(
     assert len(scenario_result["batchItems"]) == 12
     assert any(item["steelWipId"] == 103 and item["batchItemAction"] == "적재" for item in scenario_result["batchItems"])
     assert any(item["steelWipId"] == 104 and item["batchItemAction"] == "적재" for item in scenario_result["batchItems"])
+
+
+def test_estimate_batch_item_running_time_uses_buffer_proxy_and_machine_times():
+    inter_times = {
+        ("A-1", "B-6"): 2.3,
+        ("B-6", "A-1"): 2.3,
+        ("B-6", "A-2"): 1.2,
+        ("A-2", "B-6"): 1.2,
+        ("A-3", "B-1"): 0.4,
+        ("B-1", "A-3"): 0.4,
+    }
+    machine_times = {
+        "A-3": 4.2,
+        "B-1": 3.6,
+    }
+
+    temp_move_minutes = _estimate_batch_item_running_time(
+        action="TEMP_MOVE",
+        from_loc_name="A-1",
+        to_loc_name="BUF-1",
+        inter_times=inter_times,
+        machine_times=machine_times,
+    )
+    restore_minutes = _estimate_batch_item_running_time(
+        action="RESTORE",
+        from_loc_name="BUF-1",
+        to_loc_name="A-2",
+        inter_times=inter_times,
+        machine_times=machine_times,
+    )
+    picking_minutes = _estimate_batch_item_running_time(
+        action="PICKING",
+        from_loc_name="A-3",
+        to_loc_name="S4-1",
+        inter_times=inter_times,
+        machine_times=machine_times,
+    )
+    inbound_minutes = _estimate_batch_item_running_time(
+        action="INBOUND",
+        from_loc_name=None,
+        to_loc_name="B-1",
+        inter_times=inter_times,
+        machine_times=machine_times,
+    )
+    relocate_minutes = _estimate_batch_item_running_time(
+        action="RELOCATE",
+        from_loc_name="A-3",
+        to_loc_name="B-1",
+        inter_times=inter_times,
+        machine_times=machine_times,
+    )
+
+    assert temp_move_minutes == 3
+    assert restore_minutes == 2
+    assert picking_minutes == 5
+    assert inbound_minutes == 4
+    assert relocate_minutes == 1
