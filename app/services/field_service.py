@@ -1134,6 +1134,7 @@ async def _get_current_processing_context(
 
     now = datetime.now(timezone.utc)
     started_states: list[dict] = []
+    found_started_item = False
 
     for lc in lazer_cuttings:
         lc_status = lc.status.value if hasattr(lc.status, "value") else str(lc.status)
@@ -1143,6 +1144,7 @@ async def _get_current_processing_context(
         start_item = await _get_processing_start_item(db, batch.id, lc)
         if start_item is None or start_item.status != "COMPLETED":
             continue
+        found_started_item = True
 
         start_timestamp = _normalize_utc_datetime(
             start_item.destination_scanned_at or start_item.item_scanned_at
@@ -1160,6 +1162,11 @@ async def _get_current_processing_context(
             entry for entry in pending_inbound_entries
             if entry["lazer_cutting_id"] == lc.id
         ]
+        incomplete_linked_entries = [
+            entry
+            for entry in linked_pending_entries
+            if _get_enum_value(entry["item"].status) != "COMPLETED"
+        ]
         output_count = (
             await db.execute(
                 select(func.count(EstimatedWips.id)).where(
@@ -1170,13 +1177,14 @@ async def _get_current_processing_context(
 
         # 실제 미완료 INBOUND가 연결되어 있으면 이미 현장에서 적재해야 할
         # 발생 재공품이 존재한다는 뜻이므로, 시간 추정보다 이 상태를 우선한다.
-        if linked_pending_entries:
+        if incomplete_linked_entries:
             started_states.append({
                 "lc": lc,
                 "start_item": start_item,
                 "start_timestamp": start_timestamp,
                 "start_order": start_item.batch_item_order or 0,
-                "linked_pending_entries": linked_pending_entries,
+                "linked_pending_entries": incomplete_linked_entries,
+                "display_entries": incomplete_linked_entries,
                 "cutting_done": True,
                 "has_output": True,
             })
@@ -1187,7 +1195,8 @@ async def _get_current_processing_context(
             "start_item": start_item,
             "start_timestamp": start_timestamp,
             "start_order": start_item.batch_item_order or 0,
-            "linked_pending_entries": linked_pending_entries,
+            "linked_pending_entries": incomplete_linked_entries,
+            "display_entries": incomplete_linked_entries,
             "cutting_done": cutting_done,
             "has_output": output_count > 0,
         })
@@ -1203,13 +1212,10 @@ async def _get_current_processing_context(
 
     for state in started_states:
         if not state["cutting_done"]:
-            # 절단이 아직 진행 중인 현재 Job.
-            # 이 단계에서는 아직 미래 Job의 발생 재공품을 보여주면 안 된다.
-            if state["has_output"] and not state["linked_pending_entries"]:
-                continue
             return {
                 "lc": state["lc"],
                 "linked_pending_entries": state["linked_pending_entries"],
+                "display_entries": state["display_entries"],
                 "cutting_done": False,
                 "has_output": state["has_output"],
             }
@@ -1218,6 +1224,7 @@ async def _get_current_processing_context(
             return {
                 "lc": state["lc"],
                 "linked_pending_entries": state["linked_pending_entries"],
+                "display_entries": state["display_entries"],
                 "cutting_done": True,
                 "has_output": True,
             }
@@ -1226,11 +1233,12 @@ async def _get_current_processing_context(
             return {
                 "lc": state["lc"],
                 "linked_pending_entries": [],
+                "display_entries": [],
                 "cutting_done": True,
                 "has_output": False,
             }
 
-    if lazer_cuttings:
+    if not found_started_item and lazer_cuttings:
         fallback_lc = lazer_cuttings[0]
         linked_pending_entries = [
             entry for entry in pending_inbound_entries
@@ -1246,6 +1254,7 @@ async def _get_current_processing_context(
         return {
             "lc": fallback_lc,
             "linked_pending_entries": linked_pending_entries,
+            "display_entries": linked_pending_entries,
             "cutting_done": True,
             "has_output": output_count > 0,
         }
@@ -1327,42 +1336,29 @@ async def _build_field_progress_for_scenario(
     estimated_cutting_time = current_lc.estimated_cutting_time or 0
 
     current_wip_items: list[ProgressWipItem] = []
-    if context["cutting_done"] and context["has_output"]:
-        for entry in context["linked_pending_entries"]:
+    if context["has_output"]:
+        for entry in context.get("display_entries", []):
             current_wip_items.append(
                 await _build_progress_wip_item(
                     db,
                     entry["item"],
                     entry["estimated_wip"],
-                    cutting_done=True,
+                    cutting_done=context["cutting_done"],
                 )
             )
 
     lc_groups: list[ProgressLazerCutting] = []
-    for lc in lazer_cuttings:
-        lc_input_wip = await db.get(SteelWip, lc.steel_wip_id) if lc.steel_wip_id else None
-        lc_entries = [
-            entry for entry in pending_inbound_entries
-            if entry["lazer_cutting_id"] == lc.id
-        ]
-        lc_wip_items = [
-            await _build_progress_wip_item(
-                db,
-                entry["item"],
-                entry["estimated_wip"],
-                cutting_done=True,
-            )
-            for entry in lc_entries
-        ]
+    if context["has_output"] and current_wip_items:
+        lc_input_wip = await db.get(SteelWip, current_lc.steel_wip_id) if current_lc.steel_wip_id else None
         lc_groups.append(
             ProgressLazerCutting(
-                lazerCuttingId=lc.id,
+                lazerCuttingId=current_lc.id,
                 inputWipId=lc_input_wip.id if lc_input_wip else 0,
                 material=(
-                    lc_input_wip.material if lc_input_wip else (lc.input_material or "")
+                    lc_input_wip.material if lc_input_wip else (current_lc.input_material or "")
                 ),
-                estimatedCuttingTime=lc.estimated_cutting_time or 0,
-                wip=lc_wip_items,
+                estimatedCuttingTime=current_lc.estimated_cutting_time or 0,
+                wip=current_wip_items,
             )
         )
 
@@ -1502,8 +1498,10 @@ async def get_field_ready(db: AsyncSession) -> list:
                 requires_production_completion = True
                 blocking_production_batch_id = active_processing_batch.id
             if processing_context["cutting_done"] and processing_context["has_output"]:
-                current_batch_pending_inbound_count = len(
-                    processing_context["linked_pending_entries"]
+                current_batch_pending_inbound_count = sum(
+                    1
+                    for entry in processing_context["linked_pending_entries"]
+                    if _get_enum_value(entry["item"].status) != "COMPLETED"
                 )
 
         # ── 5. 생산 준비 대상 배치 그룹 (RELOCATE/PICKING만 포함) ────────
