@@ -194,12 +194,8 @@ def build_solver_input(
             thick  = 12.0
             grade  = str(rec.get("input_material") or "SM355A")
 
-        # 서비스 계획에서는 입력재 피킹/장애물 처리 안정화가 우선이다.
-        # 출력재(EstimatedWips) 적재는 솔버 밖에서 후처리로 추가한다.
-        # 그렇지 않으면 STORE/INBOUND가 중간에 끼어들며
-        # 방금 적재한 출력재를 다시 TEMP_MOVE 하는 비현실적인 계획이 만들어질 수 있다.
-        has_output = False
-        out_ph_id  = None
+        has_output = bool(rec.get("has_output") and rec.get("output_placeholder_id"))
+        out_ph_id  = rec.get("output_placeholder_id") if has_output else None
 
         job_data[job_id] = JobData(
             job_id           = job_id,
@@ -213,10 +209,29 @@ def build_solver_input(
             thickness        = thick,
             short_side       = s_side,
             long_side        = l_side,
-            generates_output = False,
+            generates_output = has_output,
             output_wip_id    = out_ph_id,
             has_external_input = (input_wip_id == 0),
         )
+
+        if has_output and out_ph_id not in wip_data:
+            out_w = float(rec.get("output_width") or 0)
+            out_l = float(rec.get("output_length") or 0)
+            wip_data[out_ph_id] = WIPData(
+                wip_id=out_ph_id,
+                stack_id=0,
+                level=0,
+                short_side=min(out_w, out_l),
+                long_side=max(out_w, out_l),
+                thickness=float(rec.get("output_thickness") or 0),
+                grade=str(rec.get("output_material") or grade),
+                spec=(
+                    f"{float(rec.get('output_thickness') or 0)}"
+                    f"*{min(out_w, out_l)}"
+                    f"*{max(out_w, out_l)}"
+                ),
+                is_output_wip=True,
+            )
 
     logger.info(
         "build_solver_input 완료: wips=%d, jobs=%d",

@@ -221,13 +221,6 @@ async def run_caasdy_for_scenario(
         },
     )
 
-    _append_inbound_items(
-        batch_plan=batch_plan,
-        cutting_records=cutting_records,
-        location_map=location_map,
-        log=log,
-    )
-
     if not batch_plan:
         logger.warning("시나리오 %d: batch_plan 항목 없음", scenario_id)
         return False
@@ -324,6 +317,10 @@ async def _query_cutting_records(
             "input_length"          : cut.input_length,
             "has_output"            : est is not None,
             "output_placeholder_id" : output_placeholder_id,
+            "output_material"       : est.material if est else None,
+            "output_thickness"      : est.thickness if est else None,
+            "output_width"          : est.width if est else None,
+            "output_length"         : est.length if est else None,
         })
     return records
 
@@ -617,11 +614,16 @@ async def _save_batch_plan(
             machine_times=machine_times,
         )
 
+        is_inbound = action_str == "INBOUND"
+        inbound_estimated_wip_id = item.get("estimated_wip_id")
+        if is_inbound and inbound_estimated_wip_id is None:
+            inbound_estimated_wip_id = item.get("wip_id")
+
         db.add(BatchItems(
             batch_id             = batch.id,
-            steel_wip_id         = item.get("wip_id"),
+            steel_wip_id         = None if is_inbound else item.get("wip_id"),
             # ✅ INBOUND의 경우 EstimatedWips 정보 저장
-            estimated_wip_id     = item.get("estimated_wip_id"),
+            estimated_wip_id     = inbound_estimated_wip_id,
             batch_item_action    = action_enum,
             status               = BatchItemsStatus.BEFORE_PENDING,
             batch_item_order     = order,
