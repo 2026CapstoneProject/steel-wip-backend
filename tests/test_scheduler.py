@@ -6,6 +6,21 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.algorithms.caasdy_adapter import _estimate_batch_item_running_time
+from app.algorithms.caasdy.data.loader import JobData, WIPData
+from app.algorithms.caasdy.env.actions import (
+    Action,
+    CraneAction,
+    ProdAction,
+    CRANE_PICKING,
+    CRANE_PRE_POSITION,
+    CRANE_RESTORE,
+    CRANE_TEMP_MOVE,
+    PROD_START,
+    PROD_NONE,
+)
+from app.algorithms.caasdy.env.state import MachinePhase, State
+from app.algorithms.caasdy.policy.greedy import greedy_policy
+from app.algorithms.caasdy.service_interface import log_to_batch_plan
 from app.models import Batch, BatchItems, EstimatedWips, LazerCutting, Projects, Scenarios, SteelWip
 
 
@@ -228,3 +243,168 @@ def test_estimate_batch_item_running_time_uses_buffer_proxy_and_machine_times():
     assert picking_minutes == 5
     assert inbound_minutes == 4
     assert relocate_minutes == 1
+
+
+def test_log_to_batch_plan_restores_to_origin_when_no_future_unload_remains():
+    location_map = {
+        "A-1": 1,
+        "A-2": 2,
+    }
+    buffer_location_map = {"BUF-1": 15}
+    s4_location_map = {"S4-1": 11, "S4-2": 12, "S4-3": 13, "S4-4": 14}
+
+    log = [
+        {
+            "action": Action(
+                crane=CraneAction(CRANE_TEMP_MOVE, wip_id=101, src_stack=1),
+                prod=ProdAction(PROD_NONE),
+            ),
+            "step": 1,
+            "clock": 0.0,
+        },
+        {
+            "action": Action(
+                crane=CraneAction(CRANE_PRE_POSITION, wip_id=101, dst_stack=2),
+                prod=ProdAction(PROD_NONE),
+            ),
+            "step": 2,
+            "clock": 5.0,
+        },
+        {
+            "action": Action(
+                crane=CraneAction(CRANE_PICKING, wip_id=202, src_stack=2, job_id=77),
+                prod=ProdAction(PROD_NONE),
+            ),
+            "step": 3,
+            "clock": 8.0,
+        },
+        {
+            "action": Action(
+                crane=CraneAction(CRANE_TEMP_MOVE, wip_id=303, src_stack=2),
+                prod=ProdAction(PROD_NONE),
+            ),
+            "step": 4,
+            "clock": 12.0,
+        },
+        {
+            "action": Action(
+                crane=CraneAction(CRANE_RESTORE, wip_id=303, dst_stack=1),
+                prod=ProdAction(PROD_NONE),
+            ),
+            "step": 5,
+            "clock": 14.0,
+        },
+    ]
+
+    items = log_to_batch_plan(
+        log=log,
+        location_map=location_map,
+        buffer_location_map=buffer_location_map,
+        s4_location_map=s4_location_map,
+    )
+
+    assert items[0]["action"] == "TEMP_MOVE"
+    assert items[0]["from_location_id"] == 1
+    assert items[0]["to_location_id"] == 15
+
+    assert items[1]["action"] == "RESTORE"
+    assert items[1]["from_location_id"] == 15
+    assert items[1]["to_location_id"] == 1
+
+    assert items[4]["action"] == "RESTORE"
+    assert items[4]["from_location_id"] == 15
+    assert items[4]["to_location_id"] == 2
+
+
+def test_log_to_batch_plan_keeps_buffer_exit_relocate_when_origin_stack_needed_later():
+    location_map = {
+        "A-4": 4,
+        "B-2": 6,
+    }
+    buffer_location_map = {"BUF-1": 15}
+    s4_location_map = {"S4-1": 11, "S4-2": 12, "S4-3": 13, "S4-4": 14}
+
+    log = [
+        {
+            "action": Action(
+                crane=CraneAction(CRANE_TEMP_MOVE, wip_id=74, src_stack=4),
+                prod=ProdAction(PROD_NONE),
+            ),
+            "step": 1,
+            "clock": 0.0,
+        },
+        {
+            "action": Action(
+                crane=CraneAction(CRANE_PRE_POSITION, wip_id=74, dst_stack=6),
+                prod=ProdAction(PROD_NONE),
+            ),
+            "step": 2,
+            "clock": 4.0,
+        },
+        {
+            "action": Action(
+                crane=CraneAction(CRANE_TEMP_MOVE, wip_id=56, src_stack=4),
+                prod=ProdAction(PROD_NONE),
+            ),
+            "step": 3,
+            "clock": 8.0,
+        },
+    ]
+
+    items = log_to_batch_plan(
+        log=log,
+        location_map=location_map,
+        buffer_location_map=buffer_location_map,
+        s4_location_map=s4_location_map,
+    )
+
+    assert items[1]["action"] == "RELOCATE"
+    assert items[1]["from_location_id"] == 15
+    assert items[1]["to_location_id"] == 6
+
+
+def test_greedy_policy_restores_buffer_before_starting_process():
+    state = State(
+        stacks={1: [11], 2: []},
+        crane_loc="A-1",
+        buffer_wips=frozenset({99}),
+        buffer_cap=1,
+        phase=MachinePhase.LOADING,
+        K_mach=frozenset({11}),
+        j_mach=501,
+        u_short=100.0,
+        u_long=200.0,
+        eta=0.0,
+        O_wait=frozenset(),
+        clock=0.0,
+        Q_rem=frozenset({501}),
+        Q_done=frozenset(),
+    )
+    wip_data = {
+        11: WIPData(11, 1, 1, 100.0, 200.0, 10.0, "SS275", "10*100*200"),
+        99: WIPData(99, 2, 1, 120.0, 240.0, 12.0, "SS275", "12*120*240"),
+    }
+    job_data = {
+        501: JobData(
+            job_id=501,
+            input_wip_id=11,
+            grade="SS275",
+            spec="10*100*200",
+            batch_count=1,
+            process_time=15.0,
+            cap_short=100.0,
+            cap_long=200.0,
+            thickness=10.0,
+            short_side=100.0,
+            long_side=200.0,
+            generates_output=False,
+            output_wip_id=None,
+            has_external_input=False,
+        ),
+    }
+
+    action = greedy_policy(state, wip_data, job_data)
+
+    assert action.crane.type == CRANE_RESTORE
+    assert action.crane.wip_id == 99
+    assert action.prod.type == PROD_NONE

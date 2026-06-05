@@ -1,4 +1,4 @@
-"""상태 클래스"""
+"""상태 클래스 (Phase12: 2x2 mach_slots + slot feasibility 1차 구현)"""
 
 import copy
 from dataclasses import dataclass, field
@@ -29,6 +29,34 @@ def _default_shift() -> "ShiftConfig":
     return ShiftConfig()
 
 
+def _default_mach_slots() -> Dict[str, Optional[int]]:
+    """
+    Phase12 1차 구현용 기본 슬롯 상태.
+
+    TL/TR/BL/BR = TopLeft, TopRight, BottomLeft, BottomRight
+
+    슬롯 값 규약
+    ────────────
+    None       : 빈 슬롯 (설비에 자재 없음)
+    wip_id > 0 : 해당 WIP이 슬롯을 점유 중
+    0          : 원자재 런(DIRECT_START) 점유 — 물리 WIP 추적 없음.
+                 wip_data에 존재하지 않으므로 UI/서비스에서는 "원자재 가공 중"으로 표시.
+
+    이 함수는 transition.py에서도 import하여 사용한다.
+    두 파일에 중복 정의하지 않도록 state.py가 단일 출처(SSOT)다.
+    """
+    return {
+        "TL": None,
+        "TR": None,
+        "BL": None,
+        "BR": None,
+    }
+
+
+def _default_mach_footprints() -> Dict[int, Tuple[str, ...]]:
+    return {}
+
+
 @dataclass
 class State:
     """
@@ -38,7 +66,7 @@ class State:
                  level 1이 바닥, index -1이 최상단 (LIFO)
     crane_loc  : 크레인 현재 위치 노드명 (예: "A-1")
 
-    buffer_wips: 버퍼에 있는 WIP ID 스택 (bottom ... top)
+    buffer_wips: 버퍼에 있는 WIP ID 집합
     buffer_cap : 잔여 버퍼 용량
 
     phase      : MachinePhase
@@ -62,7 +90,7 @@ class State:
     stacks:     Dict[int, List[int]]   # {stack_id → [wip_id, ...]}
     crane_loc:  str                    # 현재 크레인 위치 노드명
 
-    buffer_wips: Tuple[int, ...]
+    buffer_wips: FrozenSet[int]
     buffer_cap:  int
 
     phase:    MachinePhase
@@ -88,16 +116,22 @@ class State:
     # 기본값 frozenset() → 기존 Phase7~9 코드와 완전 호환
     j_mach_set: FrozenSet[int] = field(default_factory=frozenset)
 
+    # Phase 12: 설비 적재 슬롯 상태 (2x2)
+    # 값 규약: None=빈 슬롯 / wip_id>0=해당 WIP 점유 / 0=원자재 런 점유
+    # 동기화 정책:
+    #   EMPTY / LOADING / BUSY(K_mach≠∅) → K_mach 기준 (short_side 큰 순서 first-fit)
+    #   BUSY(K_mach=∅, DIRECT_START)      → 전 슬롯 0 (원자재 가공 중 표시)
+    #   BLOCKED                            → O_wait 기준 (출력재가 물리적으로 설비 위에 있음)
+    # 현재 단계에서는 feasibility에서 실제 slot packing 가능성도 함께 본다.
+    mach_slots: Dict[str, Optional[int]] = field(default_factory=_default_mach_slots)
+    mach_footprints: Dict[int, Tuple[str, ...]] = field(default_factory=_default_mach_footprints)
+
     # 편의 메서드
 
     def top_wip_of(self, stack_id: int) -> Optional[int]:
         """stack_id 스택의 최상단 WIP ID를 반환 (없으면 None)"""
         stk = self.stacks.get(stack_id, [])
         return stk[-1] if stk else None
-
-    def top_buffer_wip(self) -> Optional[int]:
-        """버퍼 최상단 WIP ID를 반환 (없으면 None)"""
-        return self.buffer_wips[-1] if self.buffer_wips else None
 
     def accessible_wips(self) -> Dict[int, int]:
         """
@@ -176,6 +210,14 @@ class State:
             f"  K_mach={sorted(self.K_mach)} q={self.j_mach} "
             + (f"co={sorted(self.j_mach_set)} " if self.j_mach_set else "")
             + f"u_s={self.u_short:.0f} u_l={self.u_long:.0f} η={self.eta:.1f}",
+            "  mach_slots="
+            + "{"
+            + ", ".join(f"{k}:{v}" for k, v in self.mach_slots.items())
+            + "}",
+            "  mach_footprints="
+            + "{"
+            + ", ".join(f"{wid}:{fp}" for wid, fp in self.mach_footprints.items())
+            + "}",
             f"  O_wait={sorted(self.O_wait)}",
         ]
         return "\n".join(lines)
@@ -204,6 +246,7 @@ def build_initial_state(
       (level이 낮은 순서 = 바닥부터 쌓임)
     - 설비 EMPTY, 버퍼 비어있음
     """
+    from ..data.loader import WIPData
     from ..data.params import STACK_TO_NODE, ShiftConfig as _ShiftConfig
 
     if shift_cfg is None:
@@ -223,7 +266,7 @@ def build_initial_state(
     return State(
         stacks      = stacks,
         crane_loc   = initial_crane_loc,
-        buffer_wips = tuple(),
+        buffer_wips = frozenset(),
         buffer_cap  = buffer_cap,
         phase       = MachinePhase.EMPTY,
         K_mach      = frozenset(),
@@ -238,4 +281,6 @@ def build_initial_state(
         step        = 0,
         shift_cfg   = shift_cfg,
         j_mach_set  = frozenset(),
+        mach_slots  = _default_mach_slots(),
+        mach_footprints = _default_mach_footprints(),
     )

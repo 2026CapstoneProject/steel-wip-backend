@@ -8,7 +8,7 @@ from typing import Optional
 MANNED1_DURATION = 180.0   # 오전 유인가공 (3시간)
 UNM1_DURATION    =  60.0   # 점심 무인 (1시간)
 MANNED2_DURATION = 300.0   # 오후 유인가공 (5시간)
-UNM2_DURATION    = 720.0   # 야간 무인 (퇴근, 12시간)
+UNM2_DURATION    = 900.0   # 야간 무인 (퇴근, 15시간)
 
 # 하위 호환 aliases
 MANNED_DURATION  = MANNED1_DURATION
@@ -117,10 +117,16 @@ DEFAULT_SHIFT: ShiftConfig = ShiftConfig()
 
 DELTA_MIN = 1.0          # 최소 시간 단위 (분). τ(WAIT) = DELTA_MIN > 0
 
+# Phase12/13 slot-aware 기본 파라미터
+ENABLE_SLOT_FEASIBILITY = True
+ENFORCE_VERTICAL_TWO_SLOT = True
+VERTICAL_TWO_SLOT_RATIO = 2.0
+C_BURY = 8.0
+
 DEFAULT_CAP_SHORT = 2500.0   # mm
 DEFAULT_CAP_LONG  = 7000.0   # mm
 
-BUFFER_CAP = 2           # 크레인 임시 버퍼 슬롯 수 (BUF-1, 동시 2개 허용)
+BUFFER_CAP = 5           # 크레인 임시 버퍼 슬롯 수 (Phase16: 비교실험 공통 조건)
 
 
 @dataclass
@@ -150,9 +156,10 @@ class MachineCapConfig:
     cap_long:                Optional[float] = None  # 설비 장변 용량 (mm). None=CSV 기반
     auto_expand_for_carried: bool            = True  # carried WIP 치수 초과 시 자동 확장
 
-C_REL  = 5.0             # 영구 재배치 페널티  (c^rel)
-C_TEMP = 2.0             # 임시 이동 페널티    (c^temp)
-R_FILL = 10.0            # 적재율 보상 승수    (r^fill)
+C_REL     = 5.0          # 영구 재배치 페널티  (c^rel)
+C_TEMP    = 2.0          # 임시 이동 페널티    (c^temp)
+C_RESTORE = 4.0          # 버퍼 복원 페널티    (c^restore) — Phase16 추가
+R_FILL    = 10.0         # 적재율 보상 승수    (r^fill)
 R_UNM  = 0.05            # 무인가공 보상/분    (r^unm)
 
 W_SHORT = 0.5            # short-side 가중치 (ω^short)
@@ -182,6 +189,7 @@ class CAASDyModelConfig:
     ----------
     c_rel       : 영구 재배치(MOVE) 전이 비용.  기본 5.0
     c_temp      : 임시 이동(TEMP_MOVE) 전이 비용. 기본 2.0
+    c_restore   : 버퍼 복원(RESTORE) 전이 비용. 기본 4.0
     r_fill      : 적재율 보상 승수.              기본 10.0
     w_short     : short-side 적재율 가중치.      기본 0.5
     w_long      : long-side  적재율 가중치.      기본 0.5
@@ -192,6 +200,7 @@ class CAASDyModelConfig:
     """
     c_rel:       float = C_REL
     c_temp:      float = C_TEMP
+    c_restore:   float = C_RESTORE
     r_fill:      float = R_FILL
     w_short:     float = W_SHORT
     w_long:      float = W_LONG
@@ -205,13 +214,13 @@ class CAASDyModelConfig:
         defaults = CAASDyModelConfig()
         parts = []
         for fname, fval in [
-            ("cR", self.c_rel),    ("cT", self.c_temp),
+            ("cR", self.c_rel),    ("cT", self.c_temp), ("cRS", self.c_restore),
             ("rF", self.r_fill),   ("wS", self.w_short),  ("wL", self.w_long),
             ("pR", self.p_run),    ("pB", self.p_buffer),
             ("cI", self.c_idle_wait), ("cP", self.c_pre_bonus),
         ]:
             default_val = getattr(defaults, {
-                "cR": "c_rel", "cT": "c_temp", "rF": "r_fill",
+                "cR": "c_rel", "cT": "c_temp", "cRS": "c_restore", "rF": "r_fill",
                 "wS": "w_short", "wL": "w_long", "pR": "p_run",
                 "pB": "p_buffer", "cI": "c_idle_wait", "cP": "c_pre_bonus",
             }[fname])

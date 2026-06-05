@@ -101,8 +101,6 @@ class RawMaterialSpecs(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    material: Mapped[str] = mapped_column(String(255), nullable=False)
-    thickness: Mapped[float] = mapped_column(Float, nullable=False)
     width: Mapped[float] = mapped_column(Float, nullable=False)
     length: Mapped[float] = mapped_column(Float, nullable=False)
     is_active: Mapped[int] = mapped_column(TINYINT(1), nullable=False, server_default=text("'1'"))

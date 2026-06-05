@@ -26,7 +26,7 @@ import sys
 from ..data.loader import WIPData, JobData
 from ..data.params import (
     DELTA_MIN, R_FILL, W_SHORT, W_LONG, P_RUN, P_MACH, P_BUFFER,
-    STACK_TO_NODE, MACHINE_NODE, C_IDLE_WAIT, C_REL, C_TEMP, C_PRE_BONUS,
+    STACK_TO_NODE, MACHINE_NODE, C_IDLE_WAIT, C_REL, C_TEMP, C_RESTORE, C_PRE_BONUS,
 )
 from ..env.state import State, MachinePhase
 from ..env.actions import Action, CraneAction, ProdAction
@@ -90,6 +90,7 @@ def build_didp_model(
     if model_cfg is not None:
         _c_rel       = float(model_cfg.c_rel)
         _c_temp      = float(model_cfg.c_temp)
+        _c_restore   = float(model_cfg.c_restore)
         _r_fill      = float(model_cfg.r_fill)
         _w_short     = float(model_cfg.w_short)
         _w_long      = float(model_cfg.w_long)
@@ -98,7 +99,7 @@ def build_didp_model(
         _c_idle_wait = float(model_cfg.c_idle_wait)
         _c_pre_bonus = float(model_cfg.c_pre_bonus)
     else:
-        _c_rel, _c_temp     = C_REL, C_TEMP
+        _c_rel, _c_temp, _c_restore = C_REL, C_TEMP, C_RESTORE
         _r_fill             = R_FILL
         _w_short, _w_long   = W_SHORT, W_LONG
         _p_run, _p_buffer   = P_RUN, P_BUFFER
@@ -286,6 +287,7 @@ def build_didp_model(
         for wi, wid in enumerate(active_wip_ids):
             _add_restore_transition(
                 model, wi, phase, steps_left, buf_cap, buffered,
+                c_restore=_c_restore,
             )
 
         # 8. Phase 3: PRE_POSITION(wi) — 버퍼 needed_wip을 전략적 선배치
@@ -552,6 +554,7 @@ def _add_temp_move_transition(
 def _add_restore_transition(
     model, wi: int,
     phase, steps_left, buf_cap, buffered,
+    c_restore: float = C_RESTORE,
 ):
     """
     RESTORE(wi): 버퍼의 WIP를 yard top으로 복원 (방어적 — 버퍼 공간 확보 목적).
@@ -559,7 +562,7 @@ def _add_restore_transition(
     """
     t = dp.Transition(
         name=f"RESTORE_{wi}",
-        cost=dp.FloatExpr.state_cost() + 0.0,
+        cost=dp.FloatExpr.state_cost() + float(c_restore),
         preconditions=[
             phase == PHASE_BUSY,
             buffered.contains(wi),

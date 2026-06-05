@@ -129,32 +129,24 @@ async def seed_database(db: AsyncSession) -> None:
     # ─────────────────────────────────────────────────────────
     raw_material_specs = [
         RawMaterialSpecs(
-            material="SM355A",
-            thickness=20.0,
             width=6096.0,
             length=2438.0,
             is_active=1,
             description="운영 허용 원자재 규격",
         ),
         RawMaterialSpecs(
-            material="SM355A",
-            thickness=20.0,
             width=2438.0,
             length=6096.0,
             is_active=1,
             description="운영 허용 원자재 규격",
         ),
         RawMaterialSpecs(
-            material="SM355A",
-            thickness=20.0,
             width=2438.0,
             length=12192.0,
             is_active=1,
             description="운영 허용 원자재 규격",
         ),
         RawMaterialSpecs(
-            material="SM355A",
-            thickness=20.0,
             width=12192.0,
             length=2438.0,
             is_active=1,

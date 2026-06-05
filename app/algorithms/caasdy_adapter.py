@@ -115,9 +115,7 @@ async def _is_allowed_raw_material_spec(
     length: float | None,
 ) -> bool:
     if (
-        material is None
-        or thickness is None
-        or width is None
+        width is None
         or length is None
     ):
         return False
@@ -126,8 +124,6 @@ async def _is_allowed_raw_material_spec(
         await db.execute(
             select(RawMaterialSpecs).where(
                 RawMaterialSpecs.is_active == 1,
-                RawMaterialSpecs.material == material,
-                RawMaterialSpecs.thickness == thickness,
             )
         )
     ).scalars().all()

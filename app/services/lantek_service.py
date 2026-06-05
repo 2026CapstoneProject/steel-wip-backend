@@ -64,8 +64,6 @@ async def _is_allowed_raw_material_spec(
         await db.execute(
             select(RawMaterialSpecs).where(
                 RawMaterialSpecs.is_active == 1,
-                RawMaterialSpecs.material == material,
-                RawMaterialSpecs.thickness == thickness,
             )
         )
     ).scalars().all()
