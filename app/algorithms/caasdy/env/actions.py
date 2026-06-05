@@ -48,13 +48,16 @@ class CraneAction:
     src_stack:  Optional[int] = None   # 출발 스택 (PICKING, MOVE, TEMP_MOVE)
     dst_stack:  Optional[int] = None   # 목적 스택 (STORE, MOVE, RESTORE)
     job_id:     Optional[int] = None   # 연결 job (PICKING, STORE)
+    slot:       Optional[str] = None   # Phase12: 설비 적재 슬롯 (TL/TR/BL/BR)
+                                       # None → 슬롯 미지정 (Phase11 이하 호환)
 
     def __repr__(self):
         args = []
-        if self.wip_id   is not None: args.append(f"wip={self.wip_id}")
+        if self.wip_id    is not None: args.append(f"wip={self.wip_id}")
         if self.src_stack is not None: args.append(f"src={self.src_stack}")
         if self.dst_stack is not None: args.append(f"dst={self.dst_stack}")
-        if self.job_id   is not None: args.append(f"job={self.job_id}")
+        if self.job_id    is not None: args.append(f"job={self.job_id}")
+        if self.slot      is not None: args.append(f"slot={self.slot}")
         return f"{self.type}({', '.join(args)})"
 
 

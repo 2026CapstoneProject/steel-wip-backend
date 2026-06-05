@@ -260,7 +260,8 @@ async def test_get_lantek_cutting_time_format(client: AsyncClient, db_session: A
 async def test_import_lantek_success(client: AsyncClient, db_session: AsyncSession):
     """
     IN_STOCK WIP이 있으면 import 성공 —
-    LazerCutting 12개 생성 + 시나리오 status → DRAFT
+    LazerCutting 12개 생성 + 시나리오 status → LANTEK_IMPORTED
+    import 단계에서는 solver / batch 생성이 일어나지 않는다.
     """
     project = await make_project(db_session)
     scenario = await make_scenario(db_session, project.id, status=None)
@@ -279,9 +280,38 @@ async def test_import_lantek_success(client: AsyncClient, db_session: AsyncSessi
     body = response.json()
     assert body["status"] == 201
 
-    # 시나리오 상태 DRAFT 확인
+    # 시나리오 상태 LANTEK_IMPORTED 확인
     await db_session.refresh(scenario)
-    assert scenario.status == "DRAFT"
+    assert scenario.status == "LANTEK_IMPORTED"
+
+
+@pytest.mark.asyncio
+async def test_import_lantek_uses_scenario_process_priority(
+    client: AsyncClient, db_session: AsyncSession
+):
+    project = await make_project(db_session, title="우선순위 테스트 프로젝트")
+    scenario = await make_scenario(db_session, project.id, title="우선순위 테스트 시나리오")
+    scenario.process_priority = "HIGH"
+    await make_wip_in_stock(db_session)
+    await db_session.commit()
+
+    files = [("file", ("demo.pdf", b"%PDF-1.4 demo", "application/pdf"))]
+    response = await client.post(
+        "/api/lantek/import",
+        data={"scenario_id": str(scenario.id)},
+        files=files,
+    )
+
+    assert response.status_code == 200
+
+    priorities = (
+        await db_session.execute(
+            select(LazerCutting.priority).where(LazerCutting.scenario_id == scenario.id)
+        )
+    ).scalars().all()
+
+    assert priorities
+    assert all(priority == "HIGH" for priority in priorities)
 
     # LazerCutting 12개 생성 확인
     lc_count_result = await db_session.execute(
@@ -298,8 +328,8 @@ async def test_import_lantek_success(client: AsyncClient, db_session: AsyncSessi
             select(BatchItems).join(Batch, BatchItems.batch_id == Batch.id).where(Batch.scenario_id == scenario.id)
         )
     ).scalars().all()
-    assert len(batch_list) == 3
-    assert len(batch_item_list) > 0
+    assert len(batch_list) == 0
+    assert len(batch_item_list) == 0
 
 
 @pytest.mark.asyncio
@@ -389,8 +419,8 @@ async def test_import_lantek_parses_pdf_layouts(monkeypatch, client: AsyncClient
     data = response.json()["data"][0]
     assert len(data["lazerCutting"]) == 2
     assert data["lazerCutting"][0]["estimatedCuttingTime"] == "00:56"
-    assert data["lazerCutting"][1]["estimatedWips"][0]["width"] == 2198.62
-    assert data["lazerCutting"][1]["estimatedWips"][0]["height"] == 1251.1
+    assert data["lazerCutting"][0]["estimatedWips"] == []
+    assert data["lazerCutting"][1]["estimatedWips"] == []
 
     cuttings = (
         await db_session.execute(select(LazerCutting).where(LazerCutting.scenario_id == scenario.id))
@@ -400,9 +430,13 @@ async def test_import_lantek_parses_pdf_layouts(monkeypatch, client: AsyncClient
 
 
 @pytest.mark.asyncio
-async def test_import_lantek_parsed_scrap_weight(monkeypatch, client: AsyncClient, db_session: AsyncSession):
+async def test_import_lantek_without_output_parts_returns_empty_estimated_wips(
+    monkeypatch,
+    client: AsyncClient,
+    db_session: AsyncSession,
+):
     """
-    PDF 파싱 경로에서는 슬랩 사이즈를 예상 잔재로 저장하고 무게도 계산한다.
+    PDF에 실제 재공품(output_parts)이 없으면 estimatedWips도 비어 있어야 한다.
     """
     project = await make_project(db_session)
     scenario = await make_scenario(db_session, project.id, status=None)
@@ -426,8 +460,7 @@ async def test_import_lantek_parsed_scrap_weight(monkeypatch, client: AsyncClien
     )
 
     assert response.status_code == 200
-    estimated = response.json()["data"][0]["lazerCutting"][0]["estimatedWips"][0]
-    assert estimated["weight"] == 188.4
+    assert response.json()["data"][0]["lazerCutting"][0]["estimatedWips"] == []
 
 
 @pytest.mark.asyncio
@@ -544,8 +577,8 @@ async def test_import_lantek_populates_scenario_result_batch_items(
     monkeypatch, client: AsyncClient, db_session: AsyncSession
 ):
     """
-    import 직후 /api/scenario/{id}에서도 batchItems가 보여야 한다.
-    solver를 따로 돌리지 않아도 office result/history 화면이 비지 않도록 보장한다.
+    import 직후에는 /api/scenario/{id}에 batchItems가 없어야 한다.
+    실행 계획은 별도 solver 실행 또는 현장 전송 시점에 생성된다.
     """
     project = await make_project(db_session)
     scenario = await make_scenario(db_session, project.id, status=None)
@@ -573,7 +606,7 @@ async def test_import_lantek_populates_scenario_result_batch_items(
     scenario_response = await client.get(f"/api/scenario/{scenario.id}")
     assert scenario_response.status_code == 200
     batch_items = scenario_response.json()["data"][0]["batchItems"]
-    assert len(batch_items) >= 2
+    assert batch_items == []
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -663,7 +696,7 @@ async def test_delete_lantek_can_reimport(client: AsyncClient, db_session: Async
 
     assert response.status_code == 200
     await db_session.refresh(scenario)
-    assert scenario.status == "DRAFT"
+    assert scenario.status == "LANTEK_IMPORTED"
 
 
 # ══════════════════════════════════════════════════════════════════════

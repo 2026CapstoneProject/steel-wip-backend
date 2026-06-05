@@ -137,7 +137,12 @@ async def test_create_scenario_success(client: AsyncClient, db_session: AsyncSes
     project = await make_project(db_session, title="포스코 건설(80톤)")
     await db_session.commit()
 
-    payload = {"project_id": project.id, "scenario_due": "2026-12-31"}
+    payload = {
+        "project_id": project.id,
+        "scenario_due": "2026-12-31",
+        "lazer_name": "LAZER2",
+        "process_priority": "HIGH",
+    }
     response = await client.post("/api/scenario/create", json=payload)
 
     assert response.status_code == 200
@@ -146,6 +151,8 @@ async def test_create_scenario_success(client: AsyncClient, db_session: AsyncSes
     data = body["data"]
     assert data["project_id"] == project.id
     assert data["status"] is None
+    assert data["lazer_name"] == "LAZER2"
+    assert data["process_priority"] == "HIGH"
     assert "포스코 건설(80톤)-1" in data["title"]
 
 
@@ -167,6 +174,35 @@ async def test_create_scenario_reuses_existing_none_status(
     assert response.status_code == 200
     data = response.json()["data"]
     assert data["id"] == existing.id  # 기존 시나리오 ID와 동일
+
+
+@pytest.mark.asyncio
+async def test_create_scenario_reuse_updates_lazer_and_priority(
+    client: AsyncClient, db_session: AsyncSession
+):
+    project = await make_project(db_session)
+    existing = await make_scenario(
+        db_session,
+        project.id,
+        status=None,
+        lazer_name="LAZER1",
+    )
+    existing.process_priority = "LOW"
+    await db_session.commit()
+
+    payload = {
+        "project_id": project.id,
+        "scenario_due": "2026-12-31",
+        "lazer_name": "LAZER3",
+        "process_priority": "MIDDLE",
+    }
+    response = await client.post("/api/scenario/create", json=payload)
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["id"] == existing.id
+    assert data["lazer_name"] == "LAZER3"
+    assert data["process_priority"] == "MIDDLE"
 
 
 @pytest.mark.asyncio
@@ -494,6 +530,30 @@ async def test_scenario_send_history_filter_project_name(
     data = response.json()["data"]
     assert len(data) == 1
     assert data[0]["projectTitle"] == "포스코 건설"
+
+
+@pytest.mark.asyncio
+async def test_scenario_send_history_filter_scenario_name(
+    client: AsyncClient, db_session: AsyncSession
+):
+    """scenarioName 필터로 특정 생산계획 이력만 조회"""
+    project = await make_project(db_session, title="포스코 건설")
+    target = await make_scenario(
+        db_session, project.id, status="ORDERED", title="포스코 건설-1차 계획"
+    )
+    other = await make_scenario(
+        db_session, project.id, status="ORDERED", title="포스코 건설-2차 계획"
+    )
+    target.ordered_at = datetime(2026, 3, 1)
+    other.ordered_at = datetime(2026, 3, 2)
+    await db_session.commit()
+
+    response = await client.get("/api/scenario_send/", params={"scenarioName": "1차"})
+
+    data = response.json()["data"]
+    assert len(data) == 1
+    assert len(data[0]["scenarios"]) == 1
+    assert data[0]["scenarios"][0]["scenarioTitle"] == "포스코 건설-1차 계획"
 
 
 # ══════════════════════════════════════════════════════════════════════

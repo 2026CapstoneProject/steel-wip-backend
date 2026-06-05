@@ -4,7 +4,7 @@ from pydantic import Field
 from typing import List,Optional
 # datetime과 함께 date도 임포트
 from datetime import datetime, date 
-from app.schemas.enums import ScenarioStatus, LazerType
+from app.schemas.enums import ScenarioStatus, LazerType, CuttingPriority
 
 class ScenarioBase(BaseModel):
     title: str
@@ -12,6 +12,7 @@ class ScenarioBase(BaseModel):
     status: Optional[ScenarioStatus] = None
     scenario_due: date  # datetime -> date 수정
     lazer_name: Optional[LazerType] = None
+    process_priority: Optional[CuttingPriority] = CuttingPriority.LOW
     project_id: Optional[int] = None
     creator_id: Optional[int] = None
     assignee_id: Optional[int] = None
@@ -35,8 +36,8 @@ class ScenarioResponse(ScenarioBase):
 class ScenarioCreateRequest(BaseModel):
     project_id: int
     scenario_due: date
-    # 필요하다면 lazer_name 등도 받을 수 있지만 일단 필수값만 정의
-    lazer_name: Optional[str] = "LAZER1"
+    lazer_name: Optional[LazerType] = LazerType.LAZER1
+    process_priority: Optional[CuttingPriority] = CuttingPriority.LOW
 
 
 
@@ -75,23 +76,35 @@ class ScenarioJobScheduleItem(BaseModel):
 
 class ScenarioCraneScheduleItem(BaseModel):
     order: int
+    batchItemId: Optional[int] = None
+    batchId: Optional[int] = None
+    batchItemOrder: Optional[int] = None
     action: str
+    actionLabel: Optional[str] = None
     steelWipId: int
     qrCode: Optional[str] = None
+    ncCode: Optional[str] = None
     thickness: Optional[float] = None
     width: Optional[float] = None
     length: Optional[float] = None
     fromLocation: str
     toLocation: str
     eventMinute: float
+    expectedStartMinute: Optional[float] = None
+    expectedDurationMinutes: Optional[float] = None
+    expectedEndMinute: Optional[float] = None
     moveType: Optional[str] = None
 
 class ScenarioResultData(BaseModel):
     projectId: int
     projectTitle: str
+    projectDue: Optional[date] = None
     scenarioId: int
     scenarioTitle: str
     scenarioDue: date
+    orderedAt: Optional[datetime] = None
+    numInputWip: int = 0
+    emergencyOrNot: bool = False
     lazerName: str
     status: Optional[str] = None
     totalCuttingTime: int

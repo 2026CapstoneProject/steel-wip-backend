@@ -15,13 +15,17 @@ Terminal penalty:
 from typing import Dict, Optional
 
 from ..data.params import (
-    C_REL, C_TEMP, R_FILL, R_UNM,
+    C_REL, C_TEMP, C_RESTORE, R_FILL, R_UNM,
     W_SHORT, W_LONG,
     P_RUN, P_BUFFER, P_MACH, P_BLOCKER,
+    C_BURY,
 )
 from ..data.loader import JobData
 from .state import State, MachinePhase
-from .actions import Action, CRANE_MOVE, CRANE_TEMP_MOVE, PROD_START, PROD_DIRECT_START
+from .actions import (
+    Action, CRANE_MOVE, CRANE_TEMP_MOVE, CRANE_RESTORE,
+    CRANE_STORE, PROD_START, PROD_DIRECT_START,
+)
 
 
 def step_cost(
@@ -44,6 +48,20 @@ def step_cost(
 
     if crane.type == CRANE_TEMP_MOVE:
         cost += C_TEMP
+
+    if crane.type == CRANE_RESTORE:
+        cost += C_RESTORE
+
+    # STORE 시 미래 필요 WIP이 있는 스택에 출력재를 적재하면 매몰 페널티 부과
+    if crane.type == CRANE_STORE and job_data:
+        dst = crane.dst_stack
+        needed_wips_set = {
+            job_data[jid].input_wip_id
+            for jid in state.Q_rem
+            if jid in job_data and job_data[jid].input_wip_id > 0
+        }
+        if any(wid in needed_wips_set for wid in state.stacks.get(dst, [])):
+            cost += C_BURY
 
     if prod.type == PROD_START and state.j_mach is not None:
         q = state.j_mach
@@ -184,9 +202,21 @@ def episode_summary(log: list, job_data: Optional[Dict[int, JobData]] = None) ->
         for entry in log:
             prod = entry["action"].prod
             if prod.type in (PROD_START, PROD_DIRECT_START):
-                jd = job_data.get(prod.job_id)
-                if jd is not None:
-                    total_processing_minutes += jd.process_time
+                if prod.type == PROD_DIRECT_START:
+                    jd = job_data.get(prod.job_id)
+                    if jd is not None:
+                        total_processing_minutes += jd.process_time
+                else:
+                    state_before = entry["state_before"]
+                    active_jobs = {prod.job_id}
+                    active_jobs |= set(getattr(state_before, "j_mach_set", frozenset()))
+                    proc_times = [
+                        job_data[j].process_time
+                        for j in active_jobs
+                        if j in job_data
+                    ]
+                    if proc_times:
+                        total_processing_minutes += max(proc_times)
 
     utilization_episode = (
         total_processing_minutes / total_work_minutes

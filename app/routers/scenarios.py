@@ -23,7 +23,9 @@ async def create_scenario(
         scenario = await scenario_service.get_or_create_scenario(
             db=db, 
             project_id=request.project_id, 
-            scenario_due=request.scenario_due
+            scenario_due=request.scenario_due,
+            lazer_name=request.lazer_name,
+            process_priority=request.process_priority,
         )
         return BaseResponse(
             status=201,
@@ -50,6 +52,7 @@ async def get_scenario_detail(scenario_id: int, db: AsyncSession = Depends(get_d
 async def delete_scenario(scenario_id: int, db: AsyncSession = Depends(get_db)):
     try:
         await scenario_service.delete_scenario_cascade(db, scenario_id)
+        await db.commit()
         return BaseResponse(
             status=200,
             message="시나리오 및 관련 데이터가 모두 삭제되었습니다.",

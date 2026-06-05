@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 from typing import Dict, List, Optional
 
@@ -41,6 +42,56 @@ _INBOUND_NODE_ORDER = [
     "A-1", "A-2", "A-3", "A-4",
     "B-1", "B-2", "B-3", "B-4", "B-5", "B-6",
 ]
+
+
+def _round_positive_minutes(value: float) -> int:
+    """소수 이동시간이 0분으로 잘리지 않도록 양수는 올림 처리한다."""
+    value = float(value or 0.0)
+    if value <= 0:
+        return 0
+    return max(1, int(math.ceil(value)))
+
+
+def _estimate_batch_item_running_time(
+    action: str,
+    from_loc_name: str | None,
+    to_loc_name: str | None,
+    inter_times: Dict[tuple[str, str], float],
+    machine_times: Dict[str, float],
+) -> int:
+    """
+    distance_matrix 기반 예상 이동시간 계산.
+
+    - TEMP_MOVE/Buf 관련: 물리 버퍼 proxy(B-6) 사용
+    - S4 관련: 설비 이동시간(machine_times) 사용
+    - INBOUND: 설비 -> 적재 스택 이동시간 사용
+    """
+    from app.algorithms.caasdy.data.loader import get_crane_time
+    from app.algorithms.caasdy.data.params import BUFFER_NODE, MACHINE_NODE
+
+    action_key = (action or "").strip().upper()
+    src = (from_loc_name or "").strip()
+    dst = (to_loc_name or "").strip()
+
+    duration = 0.0
+    if action_key == "TEMP_MOVE":
+        if src:
+            duration = get_crane_time(src, BUFFER_NODE, inter_times, machine_times, MACHINE_NODE)
+    elif action_key == "RESTORE":
+        if dst:
+            duration = get_crane_time(BUFFER_NODE, dst, inter_times, machine_times, MACHINE_NODE)
+    elif action_key == "INBOUND":
+        if dst:
+            duration = get_crane_time(MACHINE_NODE, dst, inter_times, machine_times, MACHINE_NODE)
+    elif dst.startswith("S4-"):
+        if src:
+            duration = get_crane_time(src, MACHINE_NODE, inter_times, machine_times, MACHINE_NODE)
+        else:
+            duration = machine_times.get(src, machine_times.get(BUFFER_NODE, 5.0) if src == "" else 5.0)
+    elif src and dst:
+        duration = get_crane_time(src, dst, inter_times, machine_times, MACHINE_NODE)
+
+    return _round_positive_minutes(duration)
 def _same_dimension_pair(
     width_a: float,
     length_a: float,
@@ -64,9 +115,7 @@ async def _is_allowed_raw_material_spec(
     length: float | None,
 ) -> bool:
     if (
-        material is None
-        or thickness is None
-        or width is None
+        width is None
         or length is None
     ):
         return False
@@ -75,8 +124,6 @@ async def _is_allowed_raw_material_spec(
         await db.execute(
             select(RawMaterialSpecs).where(
                 RawMaterialSpecs.is_active == 1,
-                RawMaterialSpecs.material == material,
-                RawMaterialSpecs.thickness == thickness,
             )
         )
     ).scalars().all()
@@ -261,7 +308,6 @@ async def _query_cutting_records(
             if source_wip and (
                 is_allowed_raw_material
                 or source_wip.location_id is None
-                or source_wip.stack_level is None
             ):
                 actual_wip_id = None
         elif is_allowed_raw_material:
@@ -372,7 +418,18 @@ async def _get_s4_location_map(db: AsyncSession) -> Dict[str, int]:
             .where(Locations.loc_name.in_(s4_names))
         )
     ).all()
-    return {name: lid for name, lid in rows if name}
+    location_map = {name: lid for name, lid in rows if name}
+    if len(location_map) == len(s4_names):
+        return location_map
+
+    missing_names = [name for name in s4_names if name not in location_map]
+    for name in missing_names:
+        location = Locations(loc_name=name, loc_can_stock=0, loc_stack_height=0)
+        db.add(location)
+        await db.flush()
+        location_map[name] = location.id
+
+    return location_map
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -528,6 +585,15 @@ async def _save_batch_plan(
     for cutting in cuttings:
         cutting.batch_id = batch.id
 
+    location_rows = (
+        await db.execute(select(Locations.id, Locations.loc_name))
+    ).all()
+    location_name_by_id = {int(location_id): loc_name for location_id, loc_name in location_rows if location_id}
+
+    from app.algorithms.caasdy.service_interface import _load_distance_matrix
+
+    inter_times, machine_times = _load_distance_matrix(_DATA_DIR)
+
     for order, item in enumerate(batch_plan, start=1):
         action_str = item["action"]
 
@@ -541,6 +607,16 @@ async def _save_batch_plan(
                 logger.warning("알 수 없는 action '%s', RELOCATE로 폴백", action_str)
                 action_enum = BatchItemsBatchItemAction.RELOCATE
 
+        from_location_id = item.get("from_location_id")
+        to_location_id = item.get("to_location_id")
+        expected_running_time = _estimate_batch_item_running_time(
+            action=action_str,
+            from_loc_name=location_name_by_id.get(from_location_id) if from_location_id else None,
+            to_loc_name=location_name_by_id.get(to_location_id) if to_location_id else None,
+            inter_times=inter_times,
+            machine_times=machine_times,
+        )
+
         db.add(BatchItems(
             batch_id             = batch.id,
             steel_wip_id         = item.get("wip_id"),
@@ -549,10 +625,10 @@ async def _save_batch_plan(
             batch_item_action    = action_enum,
             status               = BatchItemsStatus.BEFORE_PENDING,
             batch_item_order     = order,
-            from_location        = item.get("from_location_id"),
-            to_location          = item.get("to_location_id"),
+            from_location        = from_location_id,
+            to_location          = to_location_id,
             expected_start_time  = int(item.get("clock", 0)),
-            expected_running_time= 0,
+            expected_running_time= expected_running_time,
         ))
 
     await db.flush()

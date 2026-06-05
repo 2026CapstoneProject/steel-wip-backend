@@ -1,8 +1,9 @@
 """
 전이 함수: S_{t+1} = S^M(S_t, x_t, W_{t+1})
 
-가정:
-  - output WIP은 unique하게 생성·적재되지만, 후속 job 입력으로 재사용되지는 않는다.
+Phase12 1차 구현 추가:
+  - K_mach를 기반으로 mach_slots(2x2)를 동기화한다.
+  - 아직 슬롯 제약을 강제하지는 않고, 서비스/UI용 상태를 먼저 제공한다.
 """
 
 from typing import Dict, Optional
@@ -12,6 +13,14 @@ from ..data.params import (
 )
 from ..data.loader import WIPData, JobData, get_crane_time
 from .state import State, MachinePhase
+from .slot_layout import (
+    build_raw_job_layout,
+    empty_slots,
+    is_layout_consistent,
+    pack_wips_into_slots,
+    place_wip_in_slots,
+    SLOT_ORDER,
+)
 from .actions import (
     Action, CraneAction, ProdAction,
     CRANE_PICKING, CRANE_STORE, CRANE_MOVE, CRANE_TEMP_MOVE,
@@ -39,6 +48,96 @@ def set_co_loading(enabled: bool) -> None:
     _co_loading_mode = enabled
 
 
+# ── Phase 11: 버퍼 = 가장 가까운 적재 공간 소요시간 모드 플래그 ─────────────────
+# 활성화 시 CRANE_TEMP_MOVE / CRANE_RESTORE / CRANE_PRE_POSITION 의 τ를
+# 고정 BUFFER_NODE(B-4) 거리 대신 실제 최근접 스택까지의 최소 거리로 계산한다.
+# 기본값 False → Phase 1~10은 기존 B-4 기준 유지.
+_buffer_nearest_mode: bool = False
+
+
+def set_buffer_nearest_mode(enabled: bool) -> None:
+    """버퍼 이동 시간을 최근접 스택 거리로 계산하는 모드 전환 (Phase11에서 호출)"""
+    global _buffer_nearest_mode
+    _buffer_nearest_mode = enabled
+
+
+def _nearest_stack_time_from(
+    src_node: str,
+    inter_times: Dict,
+    machine_times: Dict,
+) -> float:
+    """
+    src_node에서 다른 모든 스택까지의 최소 이동 시간 (분).
+
+    버퍼가 물리적으로 '가장 가까운 빈 적재 공간'에 해당한다고 볼 때,
+    CRANE_TEMP_MOVE 의 τ로 사용한다.
+    """
+    best = float("inf")
+    for node in STACK_TO_NODE.values():
+        if node == src_node:
+            continue
+        t = get_crane_time(src_node, node, inter_times, machine_times)
+        if t < best:
+            best = t
+    return best if best < float("inf") else DELTA_MIN
+
+
+def _nearest_stack_node_from(
+    src_node: str,
+    inter_times: Dict,
+    machine_times: Dict,
+) -> str:
+    """
+    src_node에서 가장 가까운 '다른' 스택 노드를 반환한다.
+
+    Phase11의 nearest-buffer 모드에서 TEMP_MOVE 후 크레인 위치를
+    더 일관되게 갱신하기 위해 사용한다.
+    """
+    best_node = src_node
+    best = float("inf")
+    for node in STACK_TO_NODE.values():
+        if node == src_node:
+            continue
+        t = get_crane_time(src_node, node, inter_times, machine_times)
+        if t < best:
+            best = t
+            best_node = node
+    return best_node
+
+
+def _nearest_stack_time_to(
+    dst_node: str,
+    inter_times: Dict,
+    machine_times: Dict,
+) -> float:
+    """
+    다른 모든 스택에서 dst_node까지의 최소 이동 시간 (분).
+
+    버퍼가 '가장 가까운 위치'에 있다고 볼 때,
+    CRANE_RESTORE / CRANE_PRE_POSITION 의 τ로 사용한다.
+    """
+    best = float("inf")
+    for node in STACK_TO_NODE.values():
+        if node == dst_node:
+            continue
+        t = get_crane_time(node, dst_node, inter_times, machine_times)
+        if t < best:
+            best = t
+    return best if best < float("inf") else DELTA_MIN
+
+
+def _nearest_stack_time_to_machine(
+    machine_times: Dict[str, float],
+) -> float:
+    """버퍼에서 설비로 복귀하는 시간을 최근접 스택 기준으로 계산한다."""
+    best = float("inf")
+    for node in STACK_TO_NODE.values():
+        t = machine_times.get(node, float("inf"))
+        if t < best:
+            best = t
+    return best if best < float("inf") else DELTA_MIN
+
+
 # 크레인 행동별 소요시간 τ(x_t^crane)
 
 def get_tau(
@@ -60,10 +159,11 @@ def get_tau(
 
     if ctype == CRANE_PICKING:
         # 야드 PICKING: 현재 위치 → 스택 → 설비
-        # 버퍼 PICKING(src_stack=None): 현재 위치 → 버퍼(BUFFER_NODE) → 설비
-        src_node = BUFFER_NODE if crane.src_stack is None else STACK_TO_NODE.get(
-            crane.src_stack, state.crane_loc
-        )
+        # 버퍼 PICKING(src_stack=None): 버퍼를 최근접 임시공간으로 보고 설비까지의
+        # 최소 복귀 시간만 사용한다.
+        if crane.src_stack is None:
+            return _nearest_stack_time_to_machine(machine_times)
+        src_node = STACK_TO_NODE.get(crane.src_stack, state.crane_loc)
         # 스택까지 이동 + 설비까지 이동 (단순화: 설비 이동시간만 사용)
         t_to_stack = get_crane_time(state.crane_loc, src_node,
                                     inter_times, machine_times)
@@ -82,18 +182,25 @@ def get_tau(
         return get_crane_time(src_node, dst_node, inter_times, machine_times)
 
     if ctype == CRANE_TEMP_MOVE:
-        # 스택 → 버퍼 (B-4: 물리 버퍼 단일 위치)
         src_node = STACK_TO_NODE.get(crane.src_stack, state.crane_loc)
+        if _buffer_nearest_mode:
+            # Phase 11: 버퍼 = 가장 가까운 적재 공간 → 최소 이동 시간 사용
+            return _nearest_stack_time_from(src_node, inter_times, machine_times)
+        # Phase 1~10: B-4 고정 버퍼 위치까지의 이동 시간
         return get_crane_time(src_node, BUFFER_NODE, inter_times, machine_times)
 
     if ctype == CRANE_RESTORE:
-        # 버퍼(B-4) → 스택
         dst_node = STACK_TO_NODE.get(crane.dst_stack, state.crane_loc)
+        if _buffer_nearest_mode:
+            # Phase 11: 버퍼 ≈ 가장 가까운 위치 → 목적지까지 최소 이동 시간
+            return _nearest_stack_time_to(dst_node, inter_times, machine_times)
         return get_crane_time(BUFFER_NODE, dst_node, inter_times, machine_times)
 
     if ctype == CRANE_PRE_POSITION:
-        # Phase 3: 버퍼 → 전략적 스택 (RESTORE와 동일한 이동 시간)
         dst_node = STACK_TO_NODE.get(crane.dst_stack, state.crane_loc)
+        if _buffer_nearest_mode:
+            # Phase 11: RESTORE와 동일한 nearest-mode 적용
+            return _nearest_stack_time_to(dst_node, inter_times, machine_times)
         return get_crane_time(BUFFER_NODE, dst_node, inter_times, machine_times)
 
     return DELTA_MIN
@@ -101,7 +208,12 @@ def get_tau(
 
 # 크레인 위치 갱신
 
-def _new_crane_loc(crane: CraneAction, old_loc: str) -> str:
+def _new_crane_loc(
+    crane: CraneAction,
+    old_loc: str,
+    inter_times: Optional[Dict] = None,
+    machine_times: Optional[Dict] = None,
+) -> str:
     """행동 후 크레인이 있을 노드 이름"""
     ctype = crane.type
     if ctype == CRANE_PICKING:
@@ -113,11 +225,84 @@ def _new_crane_loc(crane: CraneAction, old_loc: str) -> str:
         dst = STACK_TO_NODE.get(crane.dst_stack)
         return dst if dst else old_loc
     if ctype == CRANE_TEMP_MOVE:
-        return BUFFER_NODE   # 물리 버퍼 위치 (service: BUF-1 proxy → B-6)
+        if _buffer_nearest_mode and inter_times is not None and machine_times is not None:
+            src = STACK_TO_NODE.get(crane.src_stack, old_loc)
+            return _nearest_stack_node_from(src, inter_times, machine_times)
+        return BUFFER_NODE   # B-4: 물리 버퍼 위치
     if ctype in (CRANE_RESTORE, CRANE_PRE_POSITION):
         dst = STACK_TO_NODE.get(crane.dst_stack)
         return dst if dst else old_loc
     return old_loc   # WAIT
+
+
+def _sync_mach_slots(
+    s: State,
+    wip_data: Dict[int, WIPData],
+) -> None:
+    """
+    Phase12 1차 구현용 슬롯 동기화.
+
+    슬롯 값 규약 (state.py _default_mach_slots 참고):
+      None       — 빈 슬롯
+      wip_id > 0 — 해당 WIP 점유
+      0          — 원자재 런(DIRECT_START) 점유
+
+    상태별 동기화 정책
+    ──────────────────
+    EMPTY / LOADING
+    BUSY (K_mach ≠ ∅)   K_mach 기준, short_side 내림차순 first-fit 배치.
+    ─────────────────────────────────────────────────────────────────────
+    BUSY (K_mach = ∅)   DIRECT_START(원자재) 런 중.
+                        물리 WIP 추적이 없으므로 전 슬롯을 0으로 채워
+                        UI에서 "원자재 가공 중"으로 표시할 수 있게 한다.
+    ─────────────────────────────────────────────────────────────────────
+    BLOCKED             출력재가 물리적으로 설비 위에 있으므로
+                        O_wait 기준으로 슬롯을 채운다.
+                        K_mach는 이미 frozenset()이므로 사용하지 않는다.
+
+    TODO(Phase12 2차):
+      - 세로 긴 자재/원자재의 2칸 점유 강제
+      - dead-space 최소화 배치
+      - slot-aware action / transition
+    """
+    if not hasattr(s, "mach_slots"):
+        return
+
+    if s.phase == MachinePhase.EMPTY:
+        # 설비 비어있음 → 슬롯 전체 초기화
+        s.mach_slots = empty_slots()
+        s.mach_footprints = {}
+
+    elif s.phase == MachinePhase.BLOCKED:
+        # 출력재(O_wait)가 물리적으로 설비 위에 있음 → O_wait 기준으로 pack
+        ok, slots, footprints = pack_wips_into_slots(s.O_wait, wip_data)
+        if not ok:
+            slots = empty_slots()
+            footprints = {}
+        s.mach_slots = slots
+        s.mach_footprints = footprints
+
+    elif s.phase == MachinePhase.BUSY and len(s.K_mach) == 0:
+        # DIRECT_START(원자재 런): _update_machine에서 raw piece footprint를
+        # 이미 기록한 경우 그대로 유지한다.
+        # 만약 비어 있다면 fallback으로 "가공 중" 표시만 둔다.
+        if not s.mach_footprints:
+            s.mach_slots = {sl: 0 for sl in SLOT_ORDER}
+            s.mach_footprints = {}
+
+    else:
+        # LOADING 또는 BUSY(K_mach ≠ ∅):
+        # _update_machine에서 slot-aware PICKING이 이미 만든 layout이
+        # 현재 K_mach와 일관되면 그대로 유지하고, 아니면 fallback pack을 사용한다.
+        if is_layout_consistent(s.mach_slots, s.mach_footprints, s.K_mach, wip_data):
+            return
+
+        ok, slots, footprints = pack_wips_into_slots(s.K_mach, wip_data)
+        if not ok:
+            slots = empty_slots()
+            footprints = {}
+        s.mach_slots = slots
+        s.mach_footprints = footprints
 
 
 # 메인 전이 함수
@@ -140,10 +325,11 @@ def transition(
     tau   = get_tau(crane, state, inter_times, machine_times)
 
     _update_machine(s, crane, prod, tau, wip_data, job_data)
+    _sync_mach_slots(s, wip_data)
 
     _update_yard(s, crane)
 
-    s.crane_loc = _new_crane_loc(crane, state.crane_loc)
+    s.crane_loc = _new_crane_loc(crane, state.crane_loc, inter_times, machine_times)
 
     s.clock += tau
     # rem_shift, is_unm은 clock으로부터 즉시 계산 가능하므로 별도 저장 안 함
@@ -225,17 +411,27 @@ def _update_machine(
                 m.j_mach_set = m.j_mach_set | {q}
             # j_mach 유지 (primary job)
 
+        # Phase12: 지정된 시작 슬롯에 실제 footprint를 기록한다.
+        # 일반 WIP는 1칸, 세로 긴 WIP는 2칸 점유.
+        if hasattr(m, "mach_slots") and crane.slot is not None:
+            placed = place_wip_in_slots(m.mach_slots, k, wip, crane.slot)
+            if placed is not None:
+                new_slots, footprint = placed
+                m.mach_slots = new_slots
+                m.mach_footprints = dict(m.mach_footprints)
+                m.mach_footprints[k] = footprint
+
         return
 
     if prod.type == PROD_START and m.phase == MachinePhase.LOADING:
         q = prod.job_id
         job = job_data[q]
         m.phase = MachinePhase.BUSY
-        # Phase 10 co-loading: 설비에 올라간 모든 job 중 최대 가공시간 사용
-        # (동시 가공 → 가장 오래 걸리는 job 기준)
+        # Phase 10 co-loading: 설비에 올라간 모든 job의 가공시간 합산
+        # (순차 절단 → 전체 사이클 시간 = sum)
         if _co_loading_mode and m.j_mach_set:
             all_active = {q} | set(m.j_mach_set)
-            ptime = max(
+            ptime = sum(
                 job_data[j].process_time for j in all_active if j in job_data
             )
         else:
@@ -261,6 +457,15 @@ def _update_machine(
             noise = np.random.normal(0.0, SIGMA_PTIME)
             ptime = max(DELTA_MIN, ptime + noise)
         m.eta = ptime
+        # Phase12: raw piece의 slot layout을 기록
+        if hasattr(m, "mach_slots"):
+            ok, slots, footprints = build_raw_job_layout(job)
+            if ok:
+                m.mach_slots = slots
+                m.mach_footprints = footprints
+            else:
+                m.mach_slots = {sl: 0 for sl in SLOT_ORDER}
+                m.mach_footprints = {}
         return
 
     if crane.type == CRANE_STORE and m.phase == MachinePhase.BLOCKED:
@@ -286,8 +491,8 @@ def _update_yard(s: State, crane: CraneAction) -> None:
         sid = crane.src_stack
         if sid is None:
             # Phase 2: 버퍼 WIP 직접 PICKING
-            if s.buffer_wips and s.buffer_wips[-1] == crane.wip_id:
-                s.buffer_wips = s.buffer_wips[:-1]
+            if crane.wip_id in s.buffer_wips:
+                s.buffer_wips = s.buffer_wips - {crane.wip_id}
                 s.buffer_cap += 1
         else:
             stk = s.stacks.get(sid, [])
@@ -315,23 +520,21 @@ def _update_yard(s: State, crane: CraneAction) -> None:
         stk = s.stacks.get(sid, [])
         if stk and stk[-1] == crane.wip_id:
             s.stacks[sid] = stk[:-1]
-            s.buffer_wips = s.buffer_wips + (crane.wip_id,)
+            s.buffer_wips = s.buffer_wips | {crane.wip_id}
             s.buffer_cap  = s.buffer_cap - 1
 
     elif crane.type == CRANE_RESTORE:
         sid = crane.dst_stack
         stk = s.stacks.get(sid, [])
-        if s.buffer_wips and s.buffer_wips[-1] == crane.wip_id:
-            s.stacks[sid]  = stk + [crane.wip_id]
-            s.buffer_wips  = s.buffer_wips[:-1]
-            s.buffer_cap   = s.buffer_cap + 1
+        s.stacks[sid]  = stk + [crane.wip_id]
+        s.buffer_wips  = s.buffer_wips - {crane.wip_id}
+        s.buffer_cap   = s.buffer_cap + 1
 
     elif crane.type == CRANE_PRE_POSITION:
         # Phase 3: RESTORE와 동일한 물리적 효과 (버퍼 → 야드 스택 top)
         # 전략적 차이는 feasibility/greedy에서 선택 로직으로 처리
         sid = crane.dst_stack
         stk = s.stacks.get(sid, [])
-        if s.buffer_wips and s.buffer_wips[-1] == crane.wip_id:
-            s.stacks[sid]  = stk + [crane.wip_id]
-            s.buffer_wips  = s.buffer_wips[:-1]
-            s.buffer_cap   = s.buffer_cap + 1
+        s.stacks[sid]  = stk + [crane.wip_id]
+        s.buffer_wips  = s.buffer_wips - {crane.wip_id}
+        s.buffer_cap   = s.buffer_cap + 1

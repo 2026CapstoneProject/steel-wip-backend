@@ -36,6 +36,8 @@ from .data.params import (
     ShiftConfig, BUFFER_CAP, STACK_TO_NODE, NODE_TO_STACK,
     BUFFER_NODES, BUFFER_NODE, MACHINE_NODE, CAASDyModelConfig,
     DEFAULT_HORIZON, DEFAULT_TIME_LIM,
+    C_REL, C_TEMP, C_RESTORE, R_FILL, W_SHORT, W_LONG,
+    P_RUN, P_BUFFER, C_IDLE_WAIT, C_PRE_BONUS,
 )
 from .env.state import build_initial_state
 from .env.actions import (
@@ -44,28 +46,35 @@ from .env.actions import (
     PROD_DIRECT_START,
 )
 from .env.feasibility import set_co_loading as _feas_set_coload
-from .env.transition import set_co_loading as _trans_set_coload
+from .env.transition import (
+    set_co_loading as _trans_set_coload,
+    set_buffer_nearest_mode as _trans_set_buf_nearest,
+)
 from .simulation.simulator import run_episode
 from .policy.rolling_horizon import rolling_horizon_policy
 
-# ── Phase10 설정 상수 (서비스 전용) ───────────────────────────────────────────
+# ── Phase16 설정 상수 (서비스 전용) ───────────────────────────────────────────
 SOLVER_NAME          = "CAASDy"
 HORIZON              = 10
-TIME_LIMIT           = 3000
+TIME_LIMIT           = 1000   # Phase16: 1000ms
 BEAM_SIZE            = 1000
 CO_LOADING_ENABLED   = True
+BUFFER_NEAREST_MODE  = True   # Phase16: 버퍼 이동시간 = 최근접 스택 거리
 
-# 교대 사이클 (기본값 — 4단계)
+# 교대 사이클 (Phase16 기준)
 MANNED1_MINUTES = 180.0   # 오전 유인가공
 UNM1_MINUTES    =  60.0   # 점심 무인
 MANNED2_MINUTES = 300.0   # 오후 유인가공
-UNM2_MINUTES    = 720.0   # 야간 무인
+UNM2_MINUTES    = 900.0   # 야간 무인 (Phase16: 15시간)
 
-MAX_CLOCK = 1440.0   # 24시간 — 솔버 시뮬레이션 최대 시각 (분)
+MAX_CLOCK = 50_000.0   # Phase16: 대형 시나리오 대응 상한
 
 # Co-loading 활성화
 _feas_set_coload(CO_LOADING_ENABLED)
 _trans_set_coload(CO_LOADING_ENABLED)
+
+# Phase16: 버퍼 최근접-스택 모드 활성화
+_trans_set_buf_nearest(BUFFER_NEAREST_MODE)
 
 # ── 서비스 BatchActionType 문자열 상수 ────────────────────────────────────────
 _ACT_PICKING   = "PICKING"
@@ -82,7 +91,7 @@ _CRANE_TO_BATCH: Dict[str, str] = {
     CRANE_MOVE       : _ACT_RELOCATE,
     CRANE_TEMP_MOVE  : _ACT_TEMP_MOVE,
     CRANE_RESTORE    : _ACT_RESTORE,
-    CRANE_PRE_POSITION: _ACT_RELOCATE,  # 전략적 선배치는 재배치로 표시
+    CRANE_PRE_POSITION: _ACT_RESTORE,  # 버퍼에서 나오면 항상 원상복구로 해석
 }
 
 # ── 공개 상수 재노출 (caasdy_adapter.py 참조용) ───────────────────────────────
@@ -307,19 +316,32 @@ def run_caasdy_solver(
         shift_cfg  = shift_cfg,
     )
 
-    model_cfg = CAASDyModelConfig()   # 기본 가중치 파라미터
+    # Phase16 모델 파라미터 (config.py 값 적용)
+    model_cfg = CAASDyModelConfig(
+        c_rel       = C_REL,
+        c_temp      = C_TEMP,
+        c_restore   = C_RESTORE,
+        r_fill      = R_FILL,
+        w_short     = W_SHORT,
+        w_long      = W_LONG,
+        p_run       = P_RUN,
+        p_buffer    = P_BUFFER,
+        c_idle_wait = C_IDLE_WAIT,
+        c_pre_bonus = C_PRE_BONUS,
+    )
 
     h, tl, bs = HORIZON, TIME_LIMIT, BEAM_SIZE
 
     def policy_fn(state, wd, jd, mt):
         return rolling_horizon_policy(
             state, wd, jd, mt,
-            horizon     = h,
-            time_limit  = tl,
-            solver_name = SOLVER_NAME,
-            beam_size   = bs,
-            verbose     = False,
-            model_cfg   = model_cfg,
+            horizon              = h,
+            time_limit           = tl,
+            solver_name          = SOLVER_NAME,
+            beam_size            = bs,
+            verbose              = False,
+            model_cfg            = model_cfg,
+            allow_greedy_fallback= True,
         )
 
     logger.info(
@@ -370,8 +392,8 @@ def log_to_batch_plan(
     RESTORE 원래 스택 보장
     ──────────────────────
     TEMP_MOVE 시 wip_id → origin (node_name, loc_id) 를 origin_stack 에 기록한다.
-    RESTORE 시 솔버가 선택한 dst_stack 을 무시하고 기록된 origin 스택으로 이동한다.
-    PRE_POSITION 은 전략적 선배치이므로 솔버가 선택한 dst_stack 을 그대로 사용한다.
+    버퍼에서 나오는 액션(RESTORE / PRE_POSITION)은 모두 기록된 origin 스택으로만
+    이동시킨다. 즉, 버퍼 경유 후 다른 스택으로의 전략 재배치는 금지한다.
 
     Parameters
     ----------
@@ -402,8 +424,8 @@ def log_to_batch_plan(
     _s4_ids   = [s4_location_map.get(n) for n in _s4_names]
     _s4_idx   = 0  # 다음 할당 인덱스
 
-    # TEMP_MOVE 시 origin 스택 기록: {wip_id → (node_name, loc_id)}
-    origin_stack: Dict[int, Tuple[str, Optional[int]]] = {}
+    # TEMP_MOVE 시 origin 스택 기록: {wip_id → (stack_id, node_name, loc_id)}
+    origin_stack: Dict[int, Tuple[Optional[int], str, Optional[int]]] = {}
 
     items: List[dict] = []
 
@@ -448,6 +470,23 @@ def log_to_batch_plan(
         if batch_action is None:
             continue
 
+        def has_future_origin_stack_unload(origin_stack_id: Optional[int], current_wip_id: Optional[int]) -> bool:
+            if origin_stack_id is None:
+                return False
+            for future in log[idx + 1 :]:
+                future_action = future.get("action")
+                if future_action is None:
+                    continue
+                future_crane = future_action.crane
+                if future_crane.type not in {CRANE_PICKING, CRANE_MOVE, CRANE_TEMP_MOVE}:
+                    continue
+                if future_crane.src_stack != origin_stack_id:
+                    continue
+                if current_wip_id is not None and future_crane.wip_id == current_wip_id:
+                    continue
+                return True
+            return False
+
         wip_id = crane.wip_id
         job_id = crane.job_id
 
@@ -482,44 +521,40 @@ def log_to_batch_plan(
             from_loc_id = combined_loc_map.get(src_node)
             to_loc_id   = buffer_loc_id   # 항상 BUF-1
             if wip_id is not None:
-                origin_stack[wip_id] = (src_node, from_loc_id)
+                origin_stack[wip_id] = (crane.src_stack, src_node, from_loc_id)
 
         elif ctype == CRANE_RESTORE:
-            # 모델의 RESTORE는 "버퍼 unload" 성격이라, 피킹이 남아 있으면
-            # 원상복구가 아니라 재배치로 해석하는 편이 물리적으로 더 일관된다.
-            has_future_picking = any(
-                future.get("action") is not None
-                and future["action"].crane.type == CRANE_PICKING
-                for future in log[idx + 1 :]
-            )
             from_loc_id = buffer_loc_id
-            dst_node = STACK_TO_NODE.get(crane.dst_stack, "")
             if wip_id is not None and wip_id in origin_stack:
-                _orig_node, _orig_loc_id = origin_stack[wip_id]
-                # 솔버 목적지가 실제 원래 스택이면, 뒤에 다른 피킹이 남아 있어도
-                # 이것은 재배치가 아니라 진짜 원상복구로 보는 편이 맞다.
-                if dst_node == _orig_node:
-                    origin_stack.pop(wip_id, None)
-                    to_loc_id = _orig_loc_id
-                else:
-                    if has_future_picking:
-                        batch_action = _ACT_RELOCATE
-                        to_loc_id = combined_loc_map.get(dst_node)
-                    else:
-                        origin_stack.pop(wip_id, None)
-                        to_loc_id = _orig_loc_id
-            else:
-                # origin 기록이 없으면 솔버 목적지로 폴백
-                if has_future_picking:
+                _orig_stack_id, _orig_node, _orig_loc_id = origin_stack.pop(wip_id)
+                if has_future_origin_stack_unload(_orig_stack_id, wip_id):
+                    # 원래 스택 아래에서 아직 추가 언로드가 남아 있으면
+                    # 솔버가 선택한 임시 목적지를 유지해야 LIFO가 깨지지 않는다.
+                    dst_node = STACK_TO_NODE.get(crane.dst_stack, "")
+                    to_loc_id = combined_loc_map.get(dst_node)
                     batch_action = _ACT_RELOCATE
+                else:
+                    to_loc_id = _orig_loc_id
+            else:
+                # origin 기록이 없으면 솔버 목적지로 폴백하되, 액션은 RESTORE 유지
+                dst_node = STACK_TO_NODE.get(crane.dst_stack, "")
                 to_loc_id = combined_loc_map.get(dst_node)
 
         elif ctype == CRANE_PRE_POSITION:
-            # BUF-1 → 전략적 스택 (원상복구가 아니라 재배치)
-            # origin 기록은 유지해 두었다가 실제 RESTORE 때 사용한다.
+            # BUF-1에서 빠지는 경우라도, 원래 스택 아래에서 추가 언로드가 남아 있으면
+            # 솔버의 임시 목적지를 유지해야 전체 순서가 물리적으로 일관된다.
             from_loc_id = buffer_loc_id
-            dst_node    = STACK_TO_NODE.get(crane.dst_stack, "")
-            to_loc_id   = combined_loc_map.get(dst_node)
+            if wip_id is not None and wip_id in origin_stack:
+                _orig_stack_id, _orig_node, _orig_loc_id = origin_stack.pop(wip_id)
+                if has_future_origin_stack_unload(_orig_stack_id, wip_id):
+                    dst_node = STACK_TO_NODE.get(crane.dst_stack, "")
+                    to_loc_id = combined_loc_map.get(dst_node)
+                    batch_action = _ACT_RELOCATE
+                else:
+                    to_loc_id = _orig_loc_id
+            else:
+                dst_node = STACK_TO_NODE.get(crane.dst_stack, "")
+                to_loc_id = combined_loc_map.get(dst_node)
 
         items.append({
             "job_id"          : job_id,

@@ -3,15 +3,23 @@
     인벤토리 WIP을 LOAD하지 않고 DIRECT_START만 허용.
     동일 규격 원자재가 여러 장 존재할 수 있으므로 인벤토리 체크 없이 항상 실행 가능.
   - generates_output=True 런의 출력재(is_output_wip=True)는 PICKING 후보에서 영구 제외.
-  - 서비스 운영 모드에서는 EMPTY 상태에서 PICKING 후보가 없을 때만 DIRECT_START 추가.
+  - DIRECT_START는 PICKING 유무와 무관하게 EMPTY 상태에서 항상 후보로 추가.
   - idle/busy marshalling의 generic job 블로커 탐색 제거 (원자재 run은 야드 WIP 불필요).
-    서비스 운영 모드에서는 PRE_POSITION 비활성화
+    PRE_POSITION 허용 — BUSY 중 버퍼 WIP을 미래 PICKING 최적 위치로 선배치
+               조건: 해당 버퍼 WIP이 Q_rem의 어떤 unique run의 input_wip_id인 경우만 생성
+               전략: WIP 수 최소 스택을 선택 (최상단 즉시 접근 보장)
+               greedy 우선순위: PRE_POSITION > RESTORE
 """
 
-from typing import Dict, List, Set
-from ..data.params import STACK_TO_NODE
+from typing import Dict, List, Optional, Set
+from ..data.params import STACK_TO_NODE, ENABLE_SLOT_FEASIBILITY
 from ..data.loader import WIPData, JobData
 from .state import State, MachinePhase
+from .slot_layout import (
+    build_raw_job_layout,
+    candidate_start_slots_for_wip,
+    pack_wips_into_slots,
+)
 from .actions import (
     Action, CraneAction, ProdAction,
     CRANE_PICKING, CRANE_STORE, CRANE_MOVE, CRANE_TEMP_MOVE, CRANE_RESTORE,
@@ -24,77 +32,6 @@ from .actions import (
 # Phase10/run.py에서 set_co_loading(True)로 활성화
 # 기본값 False → Phase7~9와 동일한 동작 유지
 _co_loading_mode: bool = False
-
-
-def _has_remaining_inventory_jobs(
-    state: State,
-    job_data: Dict[int, JobData],
-) -> bool:
-    """
-    아직 시작 전인 job 중 야드 WIP(input_wip_id>0)를 필요로 하는 항목이 남아 있는지.
-
-    서비스 운영 모드에서는 이 값이 True인 동안
-    DIRECT_START나 버퍼 unload 성격의 RESTORE를 최대한 억제해
-    기대 순서(TEMP_MOVE -> PICKING -> RESTORE)를 보존한다.
-    """
-    return any(
-        jid in job_data
-        and job_data[jid].input_wip_id > 0
-        for jid in state.Q_rem
-    )
-
-
-def _stack_has_unserved_target_job(
-    state: State,
-    job_data: Dict[int, JobData],
-    wip_data: Dict[int, WIPData],
-    stack_id: int,
-) -> bool:
-    """
-    주어진 stack에 대해, 아직 야드에서 꺼내야 하는 target job이 남아 있으면 True.
-
-    이미 K_mach에 올라간 input_wip은 해당 스택 접근이 끝난 것으로 간주한다.
-    이 판단을 이용해 다른 스택 job이 남아 있어도
-    "방금 비운 스택의 blocker는 바로 복구"를 허용한다.
-    """
-    for jid in state.Q_rem:
-        job = job_data.get(jid)
-        if job is None or job.input_wip_id <= 0:
-            continue
-        if job.input_wip_id in state.K_mach:
-            continue
-        target_wip = wip_data.get(job.input_wip_id)
-        if target_wip is None:
-            continue
-        if target_wip.stack_id == stack_id:
-            return True
-    return False
-
-
-def _top_buffer_restore_allowed(
-    state: State,
-    job_data: Dict[int, JobData],
-    wip_data: Dict[int, WIPData],
-) -> bool:
-    """
-    버퍼 top WIP를 지금 복구해도 되는지 판단한다.
-
-    기준:
-      - 버퍼가 비어 있지 않아야 함
-      - top WIP의 원래 stack(초기 stack_id)에 아직 미처리 target job이 남아 있지 않아야 함
-    """
-    top_buf = state.top_buffer_wip()
-    if top_buf is None:
-        return False
-    top_wip = wip_data.get(top_buf)
-    if top_wip is None or top_wip.stack_id <= 0:
-        return False
-    return not _stack_has_unserved_target_job(
-        state=state,
-        job_data=job_data,
-        wip_data=wip_data,
-        stack_id=top_wip.stack_id,
-    )
 
 
 def set_co_loading(enabled: bool) -> None:
@@ -124,6 +61,7 @@ def get_feasible_actions(
     phase = state.phase
 
     # 무인가공 시간대 → crane=WAIT만 허용 (크레인 정지, 설비만 가동)
+    # DIRECT_START도 원자재를 기계에 투입하는 크레인 작업이 필요하므로 무인가공 중 불가.
     if state.is_unm():
         if phase == MachinePhase.BUSY:
             return [WAIT_CONTINUE]
@@ -135,10 +73,9 @@ def get_feasible_actions(
         return [WAIT_NONE]
 
     actions: List[Action] = []
-    has_remaining_inventory_jobs = _has_remaining_inventory_jobs(state, job_data)
 
     if phase == MachinePhase.BLOCKED:
-        _add_store_actions(state, actions)
+        _add_store_actions(state, actions, job_data)
         actions.append(WAIT_NONE)
         return actions
 
@@ -151,52 +88,31 @@ def get_feasible_actions(
     if phase in (MachinePhase.EMPTY, MachinePhase.LOADING):
         _add_picking_actions(state, wip_data, job_data, actions)
         _add_start_process_actions(state, job_data, actions)
-        if (
-            phase == MachinePhase.LOADING
-            and state.buffer_wips
-            and _top_buffer_restore_allowed(state, job_data, wip_data)
-        ):
+        if phase == MachinePhase.LOADING and state.buffer_wips:
             # PICKING 완료 후 버퍼 WIP 즉시 복원 허용 (TEMP_MOVE 원상복구)
             # LOADING 중에는 기계가 아직 미가동 → prod=PROD_NONE
-            top_buf = state.top_buffer_wip()
-            if top_buf is not None:
+            for wip_id in state.buffer_wips:
                 for dst_sid in state.stacks.keys():
                     actions.append(Action(
                         crane=CraneAction(
                             type=CRANE_RESTORE,
-                            wip_id=top_buf,
+                            wip_id=wip_id,
                             dst_stack=dst_sid,
                         ),
                         prod=ProdAction(PROD_NONE),
                     ))
         if phase == MachinePhase.EMPTY:
-            has_picking_candidate = any(
-                a.crane.type == CRANE_PICKING for a in actions
-            )
-            if (
-                not has_picking_candidate
-                and (
-                    not has_remaining_inventory_jobs
-                    or _top_buffer_restore_allowed(state, job_data, wip_data)
-                )
-            ):
-                _add_cleanup_restore_actions(state, actions)
-            # 서비스 운영 모드:
-            # 접근 가능한 PICKING 후보가 하나라도 있으면 DIRECT_START를 만들지 않는다.
-            # 그렇지 않으면 raw job이 기존 야드 WIP 피킹보다 앞서 잡혀
-            # 현장 기준으로 부자연스러운 순서가 생길 수 있다.
-            _add_direct_start_actions(
-                state,
-                job_data,
-                actions,
-                allow_direct_start=not has_remaining_inventory_jobs,
-            )
-            # LOAD도 없고 DIRECT_START도 없으면 블로커 제거 (매몰 WIP 발굴)
-            any_productive = any(
-                a.crane.type == CRANE_PICKING or a.prod.type == PROD_DIRECT_START
-                for a in actions
-            )
-            if not any_productive:
+            _add_cleanup_restore_actions(state, actions)
+            # Phase 5: 원자재 job DIRECT_START는 PICKING 유무와 무관하게 항상 추가
+            # (원자재는 인벤토리 WIP 없이도 항상 실행 가능, 동일 규격 여러 장 허용)
+            _add_direct_start_actions(state, job_data, actions)
+            # PICKING이 없으면(= WIP 접근 차단) DIRECT_START 유무와 무관하게
+            # idle marshalling 액션을 항상 추가한다.
+            # 이전 조건(not any_productive)은 DIRECT_START가 있으면 marshalling을
+            # 완전히 막아, 원자재 job이 많은 Plan에서 WIP blocker가 수천 분간
+            # 방치되는 버그를 유발했다.
+            has_pickings = any(a.crane.type == CRANE_PICKING for a in actions)
+            if not has_pickings:
                 _add_idle_marshalling_actions(state, wip_data, job_data, actions)
 
     # WAIT은 항상 추가
@@ -243,7 +159,9 @@ def _add_marshalling_actions(
         if wip_id in state.K_mach:
             continue
 
-        # MOVE → 다른 스택으로 영구 이동
+        # MOVE → 다른 스택으로 영구 직접 이동
+        # state.stacks는 STACK_TO_NODE(keys 1-9, yard only)로만 구성되므로
+        # buffer는 자동으로 제외됨 — buffer를 중계 목적지로 사용하는 릴레이 방지
         for dst_sid in state.stacks.keys():
             if dst_sid == src_sid:
                 continue
@@ -268,19 +186,34 @@ def _add_marshalling_actions(
                 prod=ProdAction(PROD_CONTINUE),
             ))
 
-    # 서비스 운영 모드에서는 PRE_POSITION을 비활성화한다.
-    # 실험에서는 장기 관점 선배치로 해석될 수 있지만,
-    # 서비스 배치 결과에서는 의미 없는 왕복처럼 보이고
-    # 기대 순서(TEMP_MOVE -> PICKING -> RESTORE)를 강하게 깨뜨린다.
+    # 버퍼 WIP 중 미래 run의 input_wip인 것만 전략적 선배치
+    if needed_wips:
+        # 전략 스택: WIP 수가 가장 적은 스택 (최상단 즉시 노출 보장)
+        target_stacks = sorted(
+            state.stacks.keys(),
+            key=lambda sid: len(state.stacks[sid]),
+        )
+        for wip_id in state.buffer_wips:
+            if wip_id not in needed_wips:
+                continue
+            # 최소 WIP 스택에만 PRE_POSITION 후보 생성 (상위 2개까지)
+            for dst_sid in target_stacks[:2]:
+                out.append(Action(
+                    crane=CraneAction(
+                        type=CRANE_PRE_POSITION,
+                        wip_id=wip_id,
+                        dst_stack=dst_sid,
+                    ),
+                    prod=ProdAction(PROD_CONTINUE),
+                ))
 
     # 버퍼 내 WIP을 yard 스택으로 복원 (방어적 — 버퍼 공간 확보)
-    top_buf = state.top_buffer_wip()
-    if top_buf is not None and _top_buffer_restore_allowed(state, job_data, wip_data):
+    for wip_id in state.buffer_wips:
         for dst_sid in state.stacks.keys():
             out.append(Action(
                 crane=CraneAction(
                     type=CRANE_RESTORE,
-                    wip_id=top_buf,
+                    wip_id=wip_id,
                     dst_stack=dst_sid,
                 ),
                 prod=ProdAction(PROD_CONTINUE),
@@ -294,13 +227,12 @@ def _add_cleanup_restore_actions(
     """
     EMPTY 상태에서 버퍼 잔류 WIP를 야드로 복원하는 cleanup 행동을 추가한다.
     """
-    top_buf = state.top_buffer_wip()
-    if top_buf is not None:
+    for wip_id in state.buffer_wips:
         for dst_sid in state.stacks.keys():
             out.append(Action(
                 crane=CraneAction(
                     type=CRANE_RESTORE,
-                    wip_id=top_buf,
+                    wip_id=wip_id,
                     dst_stack=dst_sid,
                 ),
                 prod=ProdAction(PROD_NONE),
@@ -393,11 +325,12 @@ def _add_picking_actions(
         _try_add_picking(state, wip_data, job_data, out,
                       wip_id=wip_id, src_stack=sid)
 
-    # 버퍼는 LIFO이므로 최상단 WIP만 직접 PICKING 가능
-    top_buf = state.top_buffer_wip()
-    if top_buf is not None and top_buf not in state.K_mach:
+    # 버퍼 WIP은 src_stack=None으로 표시 (transition에서 buffer_wips 제거 처리)
+    for wip_id in state.buffer_wips:
+        if wip_id in state.K_mach:
+            continue
         _try_add_picking(state, wip_data, job_data, out,
-                      wip_id=top_buf, src_stack=None)
+                      wip_id=wip_id, src_stack=None)
 
 
 def _try_add_picking(
@@ -438,10 +371,14 @@ def _try_add_picking(
                     continue
                 if job.input_wip_id > 0 and job.input_wip_id != wip_id:
                     continue
-                # 이미 이 job의 WIP이 K_mach에 있으면 추가 투입 불필요
-                if any(wip_data.get(kw) is not None
-                       and wip_data[kw].grade == job.grade
-                       for kw in state.K_mach):
+                # 이미 이 secondary job template(grade+thickness)에 해당하는 WIP이
+                # K_mach에 있으면 중복 투입 불필요.
+                # grade만 비교하면 "같은 grade, 다른 두께" 조합까지 잘못 막을 수 있다.
+                if any(
+                    (existing_wip := wip_data.get(kw)) is not None
+                    and _matches_job_template(existing_wip, job)
+                    for kw in state.K_mach
+                ):
                     continue
                 # 용량 체크: primary job(j_mach)의 물리적 machine cap 기준
                 primary_job = job_data.get(state.j_mach) if state.j_mach is not None else None
@@ -470,16 +407,44 @@ def _try_add_picking(
             continue
         if new_u_long > cap_long:
             continue
+        if not _slot_feasible_after_loading(state, wip_id, wip_data):
+            continue
 
-        out.append(Action(
-            crane=CraneAction(
-                type=CRANE_PICKING,
-                wip_id=wip_id,
-                src_stack=src_stack,
-                job_id=job_id,
-            ),
-            prod=ProdAction(PROD_NONE),
-        ))
+        # Phase12: 단순 빈칸이 아니라 "실제로 둘 수 있는 시작 슬롯"만 후보화한다.
+        avail_slots = (
+            candidate_start_slots_for_wip(state.mach_slots, wip)
+            if hasattr(state, "mach_slots")
+            else [None]
+        )
+        if not avail_slots:
+            continue
+
+        for slot in avail_slots:
+            out.append(Action(
+                crane=CraneAction(
+                    type=CRANE_PICKING,
+                    wip_id=wip_id,
+                    src_stack=src_stack,
+                    job_id=job_id,
+                    slot=slot,
+                ),
+                prod=ProdAction(PROD_NONE),
+            ))
+
+
+def _slot_feasible_after_loading(
+    state: State,
+    candidate_wip_id: int,
+    wip_data: Dict[int, WIPData],
+) -> bool:
+    """
+    후보 WIP를 추가했을 때 2x2 슬롯 pack이 가능한지 확인한다.
+    """
+    if not ENABLE_SLOT_FEASIBILITY:
+        return True
+    future_members = set(state.K_mach) | {candidate_wip_id}
+    ok, _, _ = pack_wips_into_slots(future_members, wip_data)
+    return ok
 
 
 def _compat_p4(
@@ -574,24 +539,45 @@ def _add_start_process_actions(
 # 내부: STORE 후보 생성
 
 def _add_store_actions(
-    state: State,
-    out:   List[Action],
+    state:    State,
+    out:      List[Action],
+    job_data: Optional[Dict] = None,
 ) -> None:
     """
     STORE(k, dst_stack, job_id) 후보를 out에 추가한다.
     조건:
       - m_t = BLOCKED
       - k ∈ O_wait
+
+    [Phase13 개선] job_data가 주어지면 미래 필요 WIP이 있는 스택을 피해서
+    출력재를 적재한다 — 필요 WIP 매몰(stack burial) 방지.
+    우선순위: (필요 WIP 없는 스택 우선, 동급이면 WIP 수 최소 스택 우선)
     """
     if state.phase != MachinePhase.BLOCKED:
         return
 
-    available_stacks = sorted(
-        state.stacks.keys(),
-        key=lambda sid: len(state.stacks[sid]),
-    )
+    # 미래 run의 입력 WIP 집합 계산
+    needed_wips_set: Set[int] = set()
+    if job_data:
+        needed_wips_set = {
+            job_data[jid].input_wip_id
+            for jid in state.Q_rem
+            if jid in job_data and job_data[jid].input_wip_id > 0
+        }
+    # 이미 needed WIP을 가진 스택 = 추가 적재 시 매몰 위험
+    dangerous_stacks: Set[int] = {
+        sid for sid, stack in state.stacks.items()
+        if any(w in needed_wips_set for w in stack)
+    } if needed_wips_set else set()
 
     for k in state.O_wait:
+        # 발생 재공품(output WIP)은 야드 스택에만 적재 가능
+        # state.stacks는 STACK_TO_NODE(keys 1-9, yard only)이므로 buffer 자동 제외
+        available_stacks = sorted(
+            state.stacks.keys(),
+            key=lambda sid: (1 if sid in dangerous_stacks else 0,
+                             len(state.stacks[sid])),
+        )
         dst = available_stacks[0]
         out.append(Action(
             crane=CraneAction(
@@ -610,7 +596,6 @@ def _add_direct_start_actions(
     state:    State,
     job_data: Dict[int, JobData],
     out:      List[Action],
-    allow_direct_start: bool = True,
 ) -> None:
     """
     EMPTY 상태에서 야드에 PICKING 가능한 WIP이 없을 때,
@@ -621,15 +606,14 @@ def _add_direct_start_actions(
     """
     if state.phase != MachinePhase.EMPTY:
         return
-    if not allow_direct_start:
-        return
-    has_picking_candidate = any(a.crane.type == CRANE_PICKING for a in out)
-    if has_picking_candidate:
-        return
     for job_id, job in job_data.items():
         if job_id not in state.Q_rem:
             continue
         if not job.has_external_input:
+            continue
+        # Phase12: DIRECT_START도 2x2 슬롯 위에 실제 배치 가능해야만 허용
+        ok, _, _ = build_raw_job_layout(job)
+        if not ok:
             continue
         out.append(Action(
             crane=CraneAction(CRANE_WAIT),

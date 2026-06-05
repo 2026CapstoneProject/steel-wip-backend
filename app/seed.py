@@ -18,11 +18,7 @@ from app.models import (
     Locations, QrCodes, Users, SteelWip, Projects, BatchItems,
     EstimatedWips, LazerCutting, Batch, Scenarios, RawMaterialSpecs
 )
-
-import bcrypt
-
-def hash_password(plain: str) -> str:
-    return bcrypt.hashpw(plain.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+from app.core.security import hash_password
 
 # CSV 파일들이 저장된 디렉토리 경로 (프로젝트 구조에 맞게 수정 가능)
 CSV_DIR = Path(__file__).resolve().parent.parent / "seed"
@@ -133,32 +129,24 @@ async def seed_database(db: AsyncSession) -> None:
     # ─────────────────────────────────────────────────────────
     raw_material_specs = [
         RawMaterialSpecs(
-            material="SM355A",
-            thickness=20.0,
             width=6096.0,
             length=2438.0,
             is_active=1,
             description="운영 허용 원자재 규격",
         ),
         RawMaterialSpecs(
-            material="SM355A",
-            thickness=20.0,
             width=2438.0,
             length=6096.0,
             is_active=1,
             description="운영 허용 원자재 규격",
         ),
         RawMaterialSpecs(
-            material="SM355A",
-            thickness=20.0,
             width=2438.0,
             length=12192.0,
             is_active=1,
             description="운영 허용 원자재 규격",
         ),
         RawMaterialSpecs(
-            material="SM355A",
-            thickness=20.0,
             width=12192.0,
             length=2438.0,
             is_active=1,
